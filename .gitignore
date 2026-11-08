@@ -1,0 +1,22 @@
+# Python private toolboxes (recreate with: python3 -m venv .venv)
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Backtest output and audit databases (recreate by re-running)
+research/results/
+*.sqlite
+pvnt_bot/tested_snapshot.json
+
+# API keys and secrets (never upload these)
+secrets/
+.env
+*.pem
+credentials*
+
+# macOS / editor clutter
+.DS_Store
+.vscode/
+.idea/

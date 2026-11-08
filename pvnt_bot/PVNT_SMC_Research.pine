@@ -1,0 +1,151 @@
+//@version=6
+strategy("PVNT SMC Research v0.1 — paper research", overlay=true,
+     initial_capital=50000, currency=currency.USD, pyramiding=0,
+     default_qty_type=strategy.fixed,
+     commission_type=strategy.commission.cash_per_contract,
+     commission_value=0.75, slippage=2, backtest_fill_limits_assumption=1,
+     process_orders_on_close=false, calc_on_every_tick=false,
+     calc_on_order_fills=false, margin_long=1, margin_short=1)
+// Standalone research strategy. Not the existing PVNT indicator. No webhook executor.
+// Core signal matches Python; fill, sizing, context alignment and risk models differ.
+// Use standard one-minute candles. Settings > Properties controls actual costs.
+// NOTE: the seven dollar-denominated input lines below were garbled in the PDF this
+// file was rebuilt from and were reconstructed from config.json. Compile in TradingView
+// before relying on this script.
+if barstate.isfirst and (not timeframe.isminutes or timeframe.multiplier != 1)
+    runtime.error("Use a standard 1-minute chart for this research strategy.")
+
+int n = input.int(20, "Prior-bar liquidity lookback", minval=3)
+int confirmBars = input.int(5, "Maximum bars after sweep", minval=1)
+float displacement = input.float(0.8, "Displacement body / prior average range", minval=0.0, step=0.1)
+float rr = input.float(2.0, "Target R multiple", minval=0.1, step=0.1)
+float riskBudget = input.float(50, "Risk budget per proposal (USD)", minval=1)
+int maxQty = input.int(2, "Maximum contracts", minval=1)
+int maxTrades = input.int(3, "Maximum proposals per day", minval=1)
+int holdBars = input.int(45, "Maximum holding bars", minval=1)
+float dailyLimit = input.float(250, "Research daily loss (USD)", minval=1)
+float lossDistance = input.float(2000, "Research EOD loss distance (USD)", minval=0)
+float buffer = input.float(250, "Loss floor safety buffer (USD)", minval=0)
+float costSide = input.float(0.75, "Sizing: commission / side / contract (USD)", minval=0)
+int slipTicks = input.int(2, "Sizing: slippage ticks / market fill", minval=0)
+bool useContext = input.bool(false, "Require completed 15m + 90m candle direction")
+string tz = input.string("America/Chicago", "Session timezone")
+int entryStart = input.int(835, "Entry start HHMM", minval=0, maxval=2359)
+int entryEnd = input.int(1430, "Entry end HHMM", minval=0, maxval=2359)
+int flattenHHMM = input.int(1455, "Flatten HHMM", minval=0, maxval=2359)
+int startDate = input.time(timestamp("01 Jan 2025 00:00 +0000"), "Test begins")
+int endDate = input.time(timestamp("31 Dec 2030 23:59 +0000"), "Test ends")
+
+// Previous completed HTF values. [1] offset is required with lookahead_on.
+int ctx15 = request.security(syminfo.tickerid, "15", close[1] > open[1] ? 1 : close[1] < open[1] ? -1 : 0, lookahead=barmerge.lookahead_on)
+int ctx90 = request.security(syminfo.tickerid, "90", close[1] > open[1] ? 1 : close[1] < open[1] ? -1 : 0, lookahead=barmerge.lookahead_on)
+float priorLow = ta.lowest(low[1], n)
+float priorHigh = ta.highest(high[1], n)
+float priorStructureHigh = ta.highest(high[1], 3)
+float priorStructureLow = ta.lowest(low[1], 3)
+float avgRange = ta.sma(high - low, n)[1]
+float tickValue = syminfo.mintick * syminfo.pointvalue
+int clock = hour(time, tz) * 100 + minute(time, tz)
+int closeClock = hour(time_close, tz) * 100 + minute(time_close, tz)
+int dayKey = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+bool newDay = ta.change(dayKey) != 0
+bool gap = not na(time[1]) and time - time[1] > 60000
+bool inDates = time >= startDate and time_close <= endDate
+bool entrySession = clock >= entryStart and closeClock < entryEnd
+
+var float dayStart = 50000.0
+var float lossFloor = 50000.0 - lossDistance
+var bool dailyHalt = false
+var bool permanentHalt = false
+var int proposals = 0
+var int setupSide = 0
+var int sweepBar = na
+var float extreme = na
+var float structure = na
+var float tradeStop = na
+var float tradeTarget = na
+
+if barstate.isfirst
+    dayStart := strategy.initial_capital
+    lossFloor := strategy.initial_capital - lossDistance
+if newDay
+    float priorRealized = strategy.initial_capital + strategy.netprofit
+    lossFloor := math.max(lossFloor, math.min(strategy.initial_capital, priorRealized - lossDistance))
+    dayStart := strategy.equity
+    proposals := 0
+    dailyHalt := false
+    setupSide := 0
+    strategy.cancel_all()
+if gap
+    setupSide := 0
+    strategy.cancel_all()
+    if strategy.position_size != 0
+        strategy.close_all(comment="Data/session gap", immediately=true)
+
+if strategy.equity <= lossFloor + buffer
+    permanentHalt := true
+if strategy.equity <= dayStart - dailyLimit
+    dailyHalt := true
+if permanentHalt or dailyHalt or clock >= flattenHHMM or not inDates
+    strategy.cancel_all()
+    if strategy.position_size != 0
+        strategy.close_all(comment="Research risk/session guard", immediately=true)
+if strategy.position_size != 0 and strategy.opentrades > 0
+    if bar_index - strategy.opentrades.entry_bar_index(0) >= holdBars - 1
+        strategy.close_all(comment="Time stop", immediately=true)
+
+bool longSignal = false
+bool shortSignal = false
+int barsSinceGap = nz(ta.barssince(gap), bar_index)
+bool ready = bar_index >= n and barsSinceGap >= n and not gap and inDates
+if barstate.isconfirmed and ready
+    if setupSide != 0
+        int age = bar_index - sweepBar
+        bool invalid = setupSide == 1 ? low < extreme : high > extreme
+        if age > confirmBars or invalid
+            setupSide := 0
+        else if age > 0
+            bool broke = setupSide == 1 ? close > structure : close < structure
+            bool displaced = setupSide * (close - open) >= displacement * avgRange
+            bool contextOK = not useContext or (ctx15 == setupSide and ctx90 == setupSide)
+            if broke and displaced and contextOK
+                longSignal := setupSide == 1
+                shortSignal := setupSide == -1
+                setupSide := 0
+    if not longSignal and not shortSignal and setupSide == 0
+        bool bull = low < priorLow and close > priorLow
+        bool bear = high > priorHigh and close < priorHigh
+        if bull != bear
+            setupSide := bull ? 1 : -1
+            sweepBar := bar_index
+            extreme := bull ? low : high
+            structure := bull ? priorStructureHigh : priorStructureLow
+
+if (longSignal or shortSignal) and strategy.position_size == 0 and not permanentHalt and not dailyHalt and entrySession and inDates and proposals < maxTrades
+    int side = longSignal ? 1 : -1
+    float estimatedEntry = close + side * slipTicks * syminfo.mintick
+    float stopPrice = extreme - side * syminfo.mintick
+    float distance = side * (estimatedEntry - stopPrice)
+    float unitRisk = distance / syminfo.mintick * tickValue + 2 * costSide + slipTicks * tickValue
+    float remainingDaily = dailyLimit + strategy.equity - dayStart
+    float remainingAccount = strategy.equity - lossFloor - buffer
+    float available = math.max(0, math.min(riskBudget, math.min(remainingDaily, remainingAccount)))
+    int qty = distance > 0 and unitRisk > 0 ? int(math.min(maxQty, math.floor(available / unitRisk))) : 0
+    if qty > 0
+        tradeStop := stopPrice
+        tradeTarget := math.round_to_mintick(estimatedEntry + side * distance * rr)
+        proposals += 1
+        if side == 1
+            strategy.entry("L", strategy.long, qty=qty)
+            strategy.exit("LX", from_entry="L", stop=tradeStop, limit=tradeTarget)
+        else
+            strategy.entry("S", strategy.short, qty=qty)
+            strategy.exit("SX", from_entry="S", stop=tradeStop, limit=tradeTarget)
+
+plot(strategy.position_size != 0 ? tradeStop : na, "Structural stop", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? tradeTarget : na, "Research target", color=color.green, style=plot.style_linebr)
+plot(priorHigh, "Prior liquidity high", color=color.new(color.red, 75))
+plot(priorLow, "Prior liquidity low", color=color.new(color.green, 75))
+plotshape(longSignal, title="Long confirmation", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(shortSignal, title="Short confirmation", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+bgcolor(permanentHalt ? color.new(color.red, 85) : dailyHalt ? color.new(color.orange, 90) : na)
