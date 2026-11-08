@@ -65,22 +65,49 @@ in the template below.
 - Timeframe and market: 5m and 15m NQ (MNQ economics)
 - Entry / stop / target: unchanged, bars resampled
 - Why it might work: the loss so far is explained by cost-to-target ratio, not the pattern
-- Status: inbox. Needs a bar-resampling step and a change to the engine's one-minute gap rule.
+- Status: **tested** 8 Nov 2026 (research_log rows 24–33). Bigger bars shrink the loss
+  (sweep rule −0.25R at 1m → −0.07R at 15m, PF 0.96, 5 of 11 years positive) and the rule
+  beats random by ~0.1R at every size, but nothing crosses break-even after costs. 30m and
+  60m bars run out of session before a 2R target. The VWAP/ORB/FVG rule is worse at every
+  size and is retired. The runner now has `--bars N`.
+
+### TJR liquidity sweep (your own paper-traded method)
+- Source: you, 8 Nov 2026, from a detailed write-up of TJR's method
+- Spec: `research/SPEC_tjr.md`; code: `pvnt_bot/tjr.py` (Python, 1-minute trigger) and
+  `pvnt_bot/TJR_Research.pine` (TradingView, 5-minute chart, limit entry; compiles clean)
+- Status: **retired** 8 Nov 2026 by your call. Written as strict rules the method almost
+  never fires: a handful of trades a year across every variant, far too few to prove or
+  disprove an edge (research_log rows 34–42). The files stay for the record.
+
+### Exit rules for the 15-minute sweep rule
+- Source: Claude, from the slower-bars result
+- The idea: the fixed 2R target is reached only 14–20% of the time at any bar size, and on
+  30m+ bars most trades die at the 14:55 flatten. Test, as separate hypotheses: 1R target,
+  a trailing stop, a partial at 1R, and exiting at the session close by design.
+- Timeframe and market: 15m NQ (MNQ economics)
+- Status: **tested** 8 Nov 2026, research_log rows 43–49. Seven exits, all within noise of
+  zero (PF 0.95–1.04). The exit was never the problem. The sweep rule is closed.
 
 ### Opening-range breakout on its own
-- Source: Discord helper ("I mainly stick with ORB, VWAP, EMAs")
+- Source: Discord helper ("I mainly stick with ORB, VWAP, EMAs"); also the old Step 1 work
+  in the backup folder, where an ORB-with-ATR-stop rule was the best of 32 ideas on
+  2010–2020 (+$42.9k on one NQ contract, 7 of 11 years) but was never checked against a
+  random control or honest MNQ costs.
 - The idea: trade the first close beyond the 15-minute opening range, stop at the other
-  side of the range, target one or two range heights. No FVG, no VWAP.
-- Timeframe and market: 1m or 5m NQ
-- Why it might work: simplest version of what the helper says he actually trades
-- Status: inbox
+  side of the range (or an ATR multiple), target one or two range heights. No FVG, no VWAP.
+- Timeframe and market: 5m and 15m NQ
+- Why it might work: simplest version of what the helper says he actually trades, and the
+  only idea in the old log with a multi-year positive result
+- Status: inbox, **next up**
 
 ### Does "above VWAP" predict anything?
 - Source: Claude
 - The idea: not a strategy, a measurement. For every bar at 09:00, 10:00, 11:00 Chicago,
   record whether price is above or below session VWAP and what it does over the next
   30 and 60 minutes. If there is no tilt, VWAP bias filters are dead for day trades.
-- Status: inbox. Cheap, worth doing before any more VWAP-based rules.
+- Status: **tested** 8 Nov 2026 (research_log row 23, `research/vwap_measure.py`). No tilt
+  at any checkpoint or horizon; every bootstrap range straddles zero. VWAP-bias filters are
+  dead for day trades.
 
 ### FVG retest entry instead of a market entry (for the sweep rule)
 - Source: Discord helper's flow

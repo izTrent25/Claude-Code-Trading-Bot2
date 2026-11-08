@@ -20,9 +20,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'pvnt_bot'))
 from engine import Bar, Engine, Strategy  # noqa: E402
 from vwap_orb_fvg import VwapOrbFvgStrategy  # noqa: E402
+from tjr import TjrStrategy  # noqa: E402
 
 # Settings the VWAP/ORB/FVG spec asks for (research/SPEC_vwap_orb_fvg.md); --set still overrides.
 VOF_DEFAULTS = {'risk_per_trade': 20, 'reward_risk': 1.5, 'max_hold_bars': 60, 'entry_start': '08:45'}
+# Settings the TJR spec asks for (research/SPEC_tjr.md): NY open window, out by 11 AM ET, 3/day, 2-loss stop.
+TJR_DEFAULTS = {'entry_start': '08:35', 'entry_end': '09:30', 'flatten_time': '10:00', 'max_hold_bars': 120,
+                'max_trades_per_day': 3, 'max_consecutive_losses': 2, 'risk_per_trade': 500, 'daily_loss': 5000}
 
 # --- speed patch: cache each bar's parsed datetime (the engine parses it ~6 times per bar).
 _orig_dt = Bar.dt
@@ -40,11 +44,14 @@ def parse_years(s):
     return [int(x) for x in s.split(',')]
 
 
-def load_year(symbol, year):
+def load_year(symbol, year, bars=1):
     import pandas as pd
     df = pd.read_parquet(ROOT / 'data' / 'futures' / symbol / f'{year}.parquet')
     if str(df.index.tz) != 'UTC':
         df.index = df.index.tz_convert('UTC')
+    if bars > 1:  # build N-minute bars from the one-minute store; bins align to the clock (UTC, whole hours = Chicago)
+        df = df.resample(f'{bars}min', label='left', closed='left').agg(
+            {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna(subset=['open'])
     ts = df.index.strftime('%Y-%m-%dT%H:%M:%S+00:00')
     cols = [df[c].astype(float).tolist() for c in ('open', 'high', 'low', 'close', 'volume')]
     return [Bar(t, o, h, l, c, v) for t, o, h, l, c, v in zip(ts, *cols)]
@@ -68,24 +75,32 @@ class RandomStrategy(Strategy):
         return signal
 
 
-class RandomDirection(VwapOrbFvgStrategy):
-    """Control: the real strategy's signals and stop distances, but the side is a coin toss.
-    A flipped trade's stop is mirrored around the signal bar's close so the distance is kept."""
-    def __init__(self, c, seed):
-        super().__init__(c); self.rng = random.Random(seed)
-    def on_bar(self, b):
-        s = super().on_bar(b)
-        if s and self.rng.random() < 0.5:
-            s = {**s, 'side': -s['side'], 'stop': b.close + (b.close - s['stop']), 'reason': 'random-direction control'}
-        return s
+def random_direction(base):
+    """Control: the real strategy's signals and distances, but the side is a coin toss. A flipped
+    trade's stop, target and limit are mirrored around the signal bar's close so geometry is kept."""
+    class RandomDirection(base):
+        def __init__(self, c, seed):
+            super().__init__(c); self.rng = random.Random(seed)
+        def on_bar(self, b):
+            s = super().on_bar(b)
+            if s and self.rng.random() < 0.5:
+                s = {**s, 'side': -s['side'], 'stop': b.close + (b.close - s['stop']), 'reason': 'random-direction control'}
+                for k in ('target', 'limit'):
+                    if s.get(k) is not None: s[k] = b.close + (b.close - s[k])
+            return s
+    return RandomDirection
 
 
 def build_config(args):
     c = json.loads((ROOT / 'pvnt_bot' / 'config.json').read_text())
     if args.strategy in ('vwap_orb_fvg', 'vof_randdir'):
         c.update(VOF_DEFAULTS)
+    if args.strategy in ('tjr', 'tjr_randdir'):
+        c.update(TJR_DEFAULTS)
     if args.mode == 'research':
         c['loss_distance'] = 1e9  # disables the permanent account-failure halt; daily loss stop stays on
+    if args.bars > 1:
+        c['bar_seconds'] = args.bars * 60
     for kv in args.set or []:
         k, v = kv.split('=', 1)
         try: v = json.loads(v)
@@ -95,13 +110,18 @@ def build_config(args):
 
 
 def run_one(symbol, years, c, strategy, p=0.0, seed=0, progress=False):
+    bars = max(1, int(c.get('bar_seconds', 60)) // 60)
     e = Engine(c)
     if strategy == 'random':
         e.strategy = RandomStrategy(c, p, seed)
     elif strategy == 'vwap_orb_fvg':
         e.strategy = VwapOrbFvgStrategy(c)
     elif strategy == 'vof_randdir':
-        e.strategy = RandomDirection(c, seed)
+        e.strategy = random_direction(VwapOrbFvgStrategy)(c, seed)
+    elif strategy == 'tjr':
+        e.strategy = TjrStrategy(c)
+    elif strategy == 'tjr_randdir':
+        e.strategy = random_direction(TjrStrategy)(c, seed)
     # count every proposal the strategy makes, so blocked/rejected ones are visible, not hidden
     e.signals = 0; _on_bar = e.strategy.on_bar
     def counting_on_bar(b):
@@ -111,14 +131,14 @@ def run_one(symbol, years, c, strategy, p=0.0, seed=0, progress=False):
     e.strategy.on_bar = counting_on_bar
     session_bars = 0; tz = ZoneInfo(c['timezone']); t0 = time.time()
     for y in years:
-        bars = load_year(symbol, y)
-        for b in bars:
+        ybars = load_year(symbol, y, bars)
+        for b in ybars:
             e.process(b)
         # count bars inside the entry window (for calibrating the random control)
-        for b in bars[::7]:  # sample every 7th bar for speed; scaled back below
+        for b in ybars[::7]:  # sample every 7th bar for speed; scaled back below
             clock = b.dt().astimezone(tz).strftime('%H:%M')
             if c['entry_start'] <= clock < c['entry_end']: session_bars += 7
-        if progress: print(f'  {symbol} {y}: {len(bars):,} bars, trades so far {len(e.trades):,}, {time.time()-t0:.0f}s', flush=True)
+        if progress: print(f'  {symbol} {y}: {len(ybars):,} bars of {bars}m, trades so far {len(e.trades):,}, {time.time()-t0:.0f}s', flush=True)
     e.finish()
     return e, session_bars
 
@@ -162,6 +182,7 @@ def metrics(e, c, years):
         'exit_reasons': dict(Counter(x['reason'] for x in t)),
         'by_year': by_year, 'by_side': by_side,
         'account_halted': e.halted, 'bars_processed': e.count,
+        'strategy_stats': dict(sorted(getattr(e.strategy, 'stats', {}).items())),
     }
 
 
@@ -182,10 +203,11 @@ def write_results(out, name, m, trades, c):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--symbol', default='NQ'); ap.add_argument('--years', default='2010-2020')
-    ap.add_argument('--strategy', choices=['smc', 'random', 'vwap_orb_fvg', 'vof_randdir'], default='smc')
+    ap.add_argument('--strategy', choices=['smc', 'random', 'vwap_orb_fvg', 'vof_randdir', 'tjr', 'tjr_randdir'], default='smc')
     ap.add_argument('--mode', choices=['account', 'research'], default='research',
                     help='account = package defaults incl. permanent account-failure halt; research = that halt disabled')
     ap.add_argument('--set', action='append', help='override config, e.g. --set use_context=true')
+    ap.add_argument('--bars', type=int, default=1, help='bar size in minutes; >1 resamples the one-minute store (default 1)')
     ap.add_argument('--tag', required=True); ap.add_argument('--seeds', type=int, default=1)
     ap.add_argument('--p', type=float, default=None, help='random: per-bar proposal probability')
     ap.add_argument('--match-trades', type=int, default=None, help='random: calibrate p to land near this trade count')
@@ -193,14 +215,14 @@ def main():
     args = ap.parse_args()
     years = parse_years(args.years); c = build_config(args); out = ROOT / 'research' / 'results' / args.tag
     print(f'== {args.tag}: {args.strategy} on {args.symbol} {years[0]}-{years[-1]}, mode={args.mode}', flush=True)
-    if args.strategy in ('smc', 'vwap_orb_fvg'):
+    if args.strategy in ('smc', 'vwap_orb_fvg', 'tjr'):
         e, sb = run_one(args.symbol, years, c, args.strategy, progress=True)
         m = metrics(e, c, years); m['session_bars_est'] = sb
         write_results(out, 'smc', m, e.trades, c)
         print(json.dumps(m, indent=2)); return
     # random controls (random entries, or the real strategy with random direction)
     p = args.p
-    if args.strategy == 'vof_randdir':
+    if args.strategy in ('vof_randdir', 'tjr_randdir'):
         p = 0.0
     elif p is None:
         if not args.match_trades: ap.error('random needs --p or --match-trades')

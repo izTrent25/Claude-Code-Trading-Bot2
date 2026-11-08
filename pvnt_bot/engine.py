@@ -34,13 +34,14 @@ class Strategy:
     def __init__(self, c):
         self.c=c; self.bars=deque(maxlen=500); self.setup=None; self.i=0
         self.context={15:None,90:None}; self.building={}
+        self.bar_seconds=int(c.get('bar_seconds',60))  # research option: bar size; 60 = the original one-minute design
     def update_context(self,b):
         # UTC epoch-aligned buckets, only publish after a subsequent bucket starts.
         for n in (15,90):
             bucket=int(b.dt().timestamp())//(n*60)
             old=self.building.get(n)
             if old and old[0]!=bucket:
-                if old[3]>=n:
+                if old[3]>=n*60//self.bar_seconds:
                     self.context[n]=1 if old[2]>old[1] else (-1 if old[2]<old[1] else 0)
                 old=None
             self.building[n]=(bucket, old[1] if old else b.open, b.close,old[3]+1 if old else 1)
@@ -83,7 +84,8 @@ class Engine:
         self.position=None; self.pending=None; self.last=None; self.day=None
         self.day_start=self.balance; self.day_trades=0; self.daily_halted=False
         self.halted=False; self.trades=[]; self.events=[]; self.equity=[]; self.peak=self.balance
-        self.max_dd=0.; self.count=0
+        self.max_dd=0.; self.count=0; self.day_loss_streak=0
+        self.recent=deque(maxlen=50)  # last completed bars, for the optional trailing stop
     def validate_config(self):
         for key in ('tick_size','tick_value','initial_balance','loss_distance','daily_loss','risk_per_trade','max_contracts','lookback','confirmation_bars','reward_risk','max_hold_bars','max_trades_per_day'):
             if not isinstance(self.c[key],(int,float)) or not math.isfinite(self.c[key]) or self.c[key]<=0:
@@ -110,43 +112,68 @@ class Engine:
         self.trades.append({**p,'exit_time':self.last.timestamp,'exit':fill,'net':round(net,2),
                             'r':round(net/p['initial_risk'],4),'reason':reason})
         self.event(f"EXIT {reason}: ${net:.2f}"); self.position=None
+        # optional day rule: N consecutive losing trades end the day (0 = off)
+        self.day_loss_streak=self.day_loss_streak+1 if net<0 else 0
+        n=int(self.c.get('max_consecutive_losses',0) or 0)
+        if n and self.day_loss_streak>=n and not self.daily_halted:
+            self.daily_halted=True; self.pending=None; self.event(f'{n} consecutive losses: no more entries today')
     def session(self,b):
         dt=b.dt().astimezone(ZoneInfo(self.c['timezone']))
         return dt.date().isoformat(),dt.strftime('%H:%M')
+    def _open(self,s,entry,b):
+        """Risk-size and open a position at `entry` from proposal `s` (market next-open or limit fill)."""
+        side=s['side']; dist=side*(entry-s['stop'])
+        exit_cost=self.c['slippage_ticks']*self.c['tick_value']
+        unit=dist/self.c['tick_size']*self.c['tick_value']+2*self.c['commission_per_side']+exit_cost
+        room=min(self.c['risk_per_trade'],self.balance-self.floor-self.c['safety_buffer'],
+                 self.c['daily_loss']+(self.balance-self.day_start))
+        qty=min(int(self.c['max_contracts']),math.floor(max(0,room)/unit)) if dist>0 and unit>0 else 0
+        if qty>0 and self.day_trades<self.c['max_trades_per_day']:
+            stop=s['stop']
+            if s.get('target') is not None: target=s['target']
+            elif self.c.get('use_target',True): target=entry+side*dist*self.c['reward_risk']
+            else: target=None  # research option: no fixed target; stop, time stop, trail or flatten only
+            if target is not None: target=round(target/self.c['tick_size'])*self.c['tick_size']
+            self.position={**s,'entry_time':b.timestamp,'entry':entry,'stop':stop,'stop0':stop,'dist0':dist,'target':target,
+                           'qty':qty,'bars':0,'initial_risk':unit*qty,'mfe':0.0,'be':False}
+            self.balance-=self.c['commission_per_side']*qty; self.day_trades+=1
+            self.event(f"ENTRY {'LONG' if side==1 else 'SHORT'} x{qty} at {entry:.2f}")
+        else:self.event('Risk rejected proposal: no available size / daily trade cap')
     def process(self,b):
         b.validate()
         if self.last and b.dt()<=self.last.dt():raise ValueError('Bars must be strictly increasing')
-        old=self.last; self.last=b; self.count+=1
+        old=self.last; self.last=b; self.count+=1; self.recent.append(b)
         day,clock=self.session(b)
         if day!=self.day:
             if self.position:self.close(b.open,'session gap flatten')
             if self.day is not None:
                 self.floor=max(self.floor,min(self.c['floor_cap'],self.balance-self.c['loss_distance']))
             self.day=day; self.day_start=self.balance; self.day_trades=0; self.daily_halted=False
-            self.pending=None; self.strategy.setup=None
-        if old and (b.dt()-old.dt()).total_seconds()>60:
+            self.pending=None; self.strategy.setup=None; self.day_loss_streak=0
+        if old and (b.dt()-old.dt()).total_seconds()>self.c.get('bar_seconds',60):
             self.pending=None; self.strategy.setup=None
             self.strategy.bars.clear(); self.strategy.building.clear(); self.strategy.context={15:None,90:None}
             if self.position:self.close(b.open,'data gap flatten')
             self.event('Gap: canceled proposal, cleared strategy context')
         if self.pending and not self.position:
-            s=self.pending; self.pending=None
-            if not self.halted and not self.daily_halted and self.c['entry_start']<=clock<self.c['entry_end']:
-                side=s['side']; entry=b.open+side*self.c['slippage_ticks']*self.c['tick_size']
-                dist=side*(entry-s['stop'])
-                exit_cost=self.c['slippage_ticks']*self.c['tick_value']
-                unit=dist/self.c['tick_size']*self.c['tick_value']+2*self.c['commission_per_side']+exit_cost
-                room=min(self.c['risk_per_trade'],self.balance-self.floor-self.c['safety_buffer'],
-                         self.c['daily_loss']+(self.balance-self.day_start))
-                qty=min(int(self.c['max_contracts']),math.floor(max(0,room)/unit)) if dist>0 and unit>0 else 0
-                if qty>0 and self.day_trades<self.c['max_trades_per_day']:
-                    stop=s['stop']; target=entry+side*dist*self.c['reward_risk']
-                    target=round(target/self.c['tick_size'])*self.c['tick_size']
-                    self.position={**s,'entry_time':b.timestamp,'entry':entry,'stop':stop,'target':target,
-                                   'qty':qty,'bars':0,'initial_risk':unit*qty}
-                    self.balance-=self.c['commission_per_side']*qty; self.day_trades+=1
-                    self.event(f"ENTRY {'LONG' if side==1 else 'SHORT'} x{qty} at {entry:.2f}")
-                else:self.event('Risk rejected proposal: no available size / daily trade cap')
+            s=self.pending; side=s['side']; tick=self.c['tick_size']
+            in_window=not self.halted and not self.daily_halted and self.c['entry_start']<=clock<self.c['entry_end']
+            if s.get('limit') is not None:
+                # Resting limit order (research option). Fills only on a one-tick penetration, at the limit
+                # price, no favourable improvement. Dies if the stop level trades first, if the target is
+                # reached without a fill, if it expires, or if the entry window closes.
+                s['_age']=s.get('_age',0)+1
+                touched=(b.low<=s['limit']-tick) if side==1 else (b.high>=s['limit']+tick)
+                dead=(b.low<=s['stop']) if side==1 else (b.high>=s['stop'])
+                tgt=s.get('target'); missed=tgt is not None and ((b.high>=tgt) if side==1 else (b.low<=tgt))
+                if touched and in_window:
+                    self.pending=None; self._open(s,s['limit'],b)
+                elif dead or missed or s['_age']>int(s.get('expire_bars',60)) or not in_window:
+                    self.pending=None; self.event('Limit proposal cancelled: ' + ('stop level traded first' if dead else 'target reached before fill' if missed else 'expired or outside entry window'))
+            else:
+                self.pending=None
+                if in_window:
+                    self._open(s,b.open+side*self.c['slippage_ticks']*tick,b)
         p=self.position
         if p:
             p['bars']+=1; side=p['side']
@@ -158,10 +185,23 @@ class Engine:
             if triggered:
                 fill=min(b.open,effective) if side==1 else max(b.open,effective)
                 self.close(fill,'risk guard' if effective!=p['stop'] else 'stop')
-            elif (b.high>=p['target']+self.c['tick_size'] if side==1 else b.low<=p['target']-self.c['tick_size']):
+            elif p['target'] is not None and (b.high>=p['target']+self.c['tick_size'] if side==1 else b.low<=p['target']-self.c['tick_size']):
                 self.close(p['target'],'target')
             elif clock>=self.c['flatten_time'] or p['bars']>=self.c['max_hold_bars']:
                 self.close(b.close,'session flatten' if clock>=self.c['flatten_time'] else 'time stop')
+            # optional management (research): break-even after +X R, then trail behind the last N bars.
+            # Computed from this bar, applied from the next bar, so intrabar order is never assumed.
+            p=self.position
+            if p:
+                be_r=float(self.c.get('breakeven_r',0) or 0); trail_n=int(self.c.get('trail_bars',0) or 0)
+                if be_r or trail_n:
+                    p['mfe']=max(p['mfe'],side*((b.high if side==1 else b.low)-p['entry']))
+                    armed=p['mfe']>=be_r*p['dist0'] if be_r else True
+                    if armed and be_r and not p['be']:
+                        p['be']=True; p['stop']=max(p['stop'],p['entry']) if side==1 else min(p['stop'],p['entry'])
+                    if armed and trail_n and len(self.recent)>=trail_n:
+                        ref=min(x.low for x in list(self.recent)[-trail_n:]) if side==1 else max(x.high for x in list(self.recent)[-trail_n:])
+                        p['stop']=max(p['stop'],ref) if side==1 else min(p['stop'],ref)  # only ever tightens
         eq=self.equity_at(b.close)
         if eq<=self.floor+self.c['safety_buffer']:
             self.halted=True; self.pending=None

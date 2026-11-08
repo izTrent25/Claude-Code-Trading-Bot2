@@ -22,6 +22,12 @@ every working session.
   0.58 against a wish of 2.0, direction call no better than a coin toss.
 - **Lesson so far:** the problem is the one-minute timeframe and the cost-to-target ratio
   (about $5 of costs on trades aiming for ten points), not the specific pattern.
+- **Slower bars (8 Nov):** confirmed. The sweep rule goes from −0.25R at 1m to −0.07R at
+  15m (PF 0.96, 5 of 11 years positive) and beats random by ~0.1R at every bar size, but
+  never clears costs. 30m+ bars run out of session before a 2R target. The VWAP/ORB/FVG
+  rule is retired. The runner takes `--bars N`.
+- **VWAP measurement (8 Nov):** being above or below session VWAP predicts nothing about
+  the next hour. VWAP-bias filters are dead.
 - **Package state:** `pvnt_bot/` is the helper's starter, rebuilt from the PDF; 27 tests
   pass; dashboard works at http://127.0.0.1:8765; it never places orders. The Pine script
   has not been compiled in TradingView.
@@ -35,15 +41,23 @@ every working session.
   The sweep rule's Pine compiled clean; tester details in the report's "TradingView
   check" section. Basic plan: about one week of 1-minute history, one saved script.
 
+- **TJR (8 Nov):** built to your write-up (`research/SPEC_tjr.md`, `pvnt_bot/tjr.py`,
+  `pvnt_bot/TJR_Research.pine`), fired only a few times a year as strict rules, retired by
+  your call. The TradingView chart has the sweep strategy ($500 budget) back on it.
+
+- **Exit rules (8 Nov):** seven exits on the 15-minute sweep rule, all within noise of zero
+  (PF 0.95–1.04). The sweep rule is closed. The engine now has `use_target`,
+  `breakeven_r`, `trail_bars`, `max_consecutive_losses`, explicit `target` and `limit`
+  proposals, all off by default and covered by tests (35 pass).
+
 ## Next up (in order)
 
-1. Commit and push the TradingView results and page updates so GitHub matches the Mac.
-2. Decide whether to keep the $500-budget copy of the sweep script as your one saved
+1. Commit and push everything since the TradingView results (engine options, TJR files,
+   exit experiments, pages).
+2. The opening-range breakout on its own, on 5m and 15m bars, with a random control. The
+   old Step 1 log had an ORB rule as its best idea; this time it gets the honest test.
+3. Decide whether to keep the $500-budget copy of the sweep script as your one saved
    TradingView script (it is in the editor, unsaved) or discard it.
-3. Run the cheap VWAP measurement from `IDEAS.md` ("Does above VWAP predict anything?").
-4. Build the slower-bars experiment (5m and 15m) for both existing rules; TradingView can
-   now give a second opinion on whatever survives.
-5. Then the opening-range breakout on its own.
 
 ## How to run things
 

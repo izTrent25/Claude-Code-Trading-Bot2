@@ -39,8 +39,8 @@ class VwapOrbFvgStrategy:
         utc = b.dt(); local = utc.astimezone(self.tz); clock = local.strftime('%H:%M')
         if local.date() != self.day:
             self.day = local.date(); self._reset_day()
-        if self.last_utc and (utc - self.last_utc).total_seconds() > 60:
-            self.recent.clear()  # a three-bar pattern must be three consecutive minutes
+        if self.last_utc and (utc - self.last_utc).total_seconds() > self.c.get('bar_seconds', 60):
+            self.recent.clear()  # a three-bar pattern must be three consecutive bars
         self.last_utc = utc
         signal = None
         if clock < self.or_start:          # overnight: not part of this strategy

@@ -129,4 +129,47 @@ class ExtendedTests(unittest.TestCase):
         with patch('urllib.request.urlopen',return_value=response):
             with self.assertRaisesRegex(RuntimeError,'error code 3'):ProjectX().post('/api/Contract/search',{})
 
+class ResearchOptionTests(unittest.TestCase):
+    """Options added 2026-11-08 for the TJR research: explicit targets, limit entries, consecutive-loss stop."""
+    def make(self,**over):
+        c=copy.deepcopy(C);c.update(entry_start='00:00',entry_end='23:58',flatten_time='23:59',risk_per_trade=100,max_contracts=1);c.update(over)
+        return Engine(c)
+    def test_explicit_target_overrides_r_multiple(self):
+        e=self.make();e.process(b('15:00'));e.pending={'side':1,'stop':95,'target':123.4,'signal_time':e.last.timestamp}
+        e.process(b('15:01'));self.assertEqual(e.position['target'],123.5)  # snapped to the tick grid
+    def test_limit_needs_one_tick_penetration_and_fills_at_limit(self):
+        e=self.make();e.process(b('15:00'));e.pending={'side':1,'stop':95,'limit':98,'expire_bars':10,'signal_time':e.last.timestamp}
+        e.process(b('15:01',100,101,98,100));self.assertIsNone(e.position);self.assertIsNotNone(e.pending)   # touch only
+        e.process(b('15:02',100,101,97.75,100));self.assertEqual(e.position['entry'],98)                   # one tick through
+    def test_limit_dies_when_stop_level_trades_first(self):
+        e=self.make();e.process(b('15:00'));e.pending={'side':1,'stop':95,'limit':98,'signal_time':e.last.timestamp}
+        e.process(b('15:01',100,101,99,100));e.process(b('15:02',99,100,94,96))   # gap through limit and stop on one bar
+        self.assertIsNone(e.position);self.assertEqual(e.trades[-1]['reason'],'stop')  # filled then stopped: conservative
+    def test_limit_expires(self):
+        e=self.make();e.process(b('15:00'));e.pending={'side':1,'stop':95,'limit':98,'expire_bars':2,'signal_time':e.last.timestamp}
+        for t in ('15:01','15:02','15:03'):e.process(b(t,100,101,99,100))
+        self.assertIsNone(e.pending);self.assertIsNone(e.position)
+    def test_no_target_runs_to_time_stop(self):
+        e=self.make(use_target=False,max_hold_bars=3);e.process(b('15:00'));e.pending={'side':1,'stop':95,'signal_time':e.last.timestamp}
+        e.process(b('15:01'));self.assertIsNone(e.position['target'])
+        e.process(b('15:02',100,130,100,120));self.assertIsNotNone(e.position)      # would have been a 2R target
+        e.process(b('15:03',120,121,119,120));self.assertEqual(e.trades[-1]['reason'],'time stop')
+    def test_breakeven_applies_from_next_bar(self):
+        e=self.make(breakeven_r=1.0);e.process(b('15:00'));e.pending={'side':1,'stop':95,'signal_time':e.last.timestamp}
+        e.process(b('15:01'));entry=e.position['entry']                               # entry 100.5, risk 5.5, target 111.5
+        e.process(b('15:02',100,108,100,107));self.assertEqual(e.position['stop'],entry)   # +1R seen (not 2R): stop now at entry
+        e.process(b('15:03',107,108,100.4,105));self.assertIsNone(e.position);self.assertEqual(e.trades[-1]['reason'],'stop')
+    def test_trailing_stop_tightens_behind_last_bars(self):
+        e=self.make(use_target=False,trail_bars=2);e.process(b('15:00'));e.pending={'side':1,'stop':95,'signal_time':e.last.timestamp}
+        e.process(b('15:01',100,101,99,100));e.process(b('15:02',100,106,100,105));e.process(b('15:03',105,109,104,108))
+        self.assertEqual(e.position['stop'],100)                                        # lowest low of the last 2 completed bars
+        e.process(b('15:04',108,110,106,109));self.assertEqual(e.position['stop'],104)
+        e.process(b('15:05',109,110,104.5,106));self.assertEqual(e.position['stop'],104.5)
+    def test_two_consecutive_losses_end_the_day(self):
+        e=self.make(max_consecutive_losses=2)
+        for t_sig,t_in,t_out in (('15:00','15:01','15:02'),('15:03','15:04','15:05')):
+            e.process(b(t_sig));e.pending={'side':1,'stop':95,'signal_time':e.last.timestamp};e.process(b(t_in));e.process(b(t_out,100,101,90,95))
+        self.assertEqual(len(e.trades),2);self.assertTrue(all(t['net']<0 for t in e.trades));self.assertTrue(e.daily_halted)
+        e.process(Bar('2026-11-03T15:00:00+00:00',100,101,99,100));self.assertFalse(e.daily_halted);self.assertEqual(e.day_loss_streak,0)
+
 if __name__=='__main__':unittest.main()
