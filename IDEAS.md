@@ -41,6 +41,19 @@ in the template below.
 
 ## Backlog
 
+### TradingView MCP tools for backtesting indicators and strategies
+- Source: you, 8 November 2026 — https://github.com/tradesdontlie/tradingview-mcp
+- The idea: bring the tradingview-mcp toolset into this project and connect it to your
+  TradingView account so Claude can run and read backtests of indicators and strategies
+  directly in TradingView, instead of only the local Python runner.
+- Timeframe and market: whatever the chart is set to
+- Why it might work: TradingView's Strategy Tester is a second, independent engine; it
+  would let the Pine scripts be compiled and tested without hand-pasting
+- Status: installed in `tools/tradingview-mcp/` and registered in `.mcp.json`. Waiting on
+  you: install TradingView Desktop, launch it with the debug script, restart Claude Code.
+  Then the first job is compiling `pvnt_bot/PVNT_SMC_Research.pine` and reading its
+  Strategy Tester results. See `tools/README.md` for the network caveat.
+
 ### Same ideas on slower bars
 - Source: Claude, from the 2010–2020 results
 - The idea: both one-minute rules were coin flips before costs. Re-run the sweep rule and

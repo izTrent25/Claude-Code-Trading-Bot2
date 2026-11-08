@@ -5,6 +5,9 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# Node packages for the TradingView tool (recreate with: cd tools/tradingview-mcp && npm install)
+node_modules/
+
 # Backtest output and audit databases (recreate by re-running)
 research/results/
 *.sqlite
