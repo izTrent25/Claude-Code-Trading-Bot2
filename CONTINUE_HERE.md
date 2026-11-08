@@ -28,21 +28,22 @@ every working session.
 - **Git:** `main` only. Last push had the data store and notes. Everything in `pvnt_bot/`,
   `research/`, `IDEAS.md`, this file and `.gitignore` is **not committed yet**.
 
+- **TradingView tool:** connected and working as of 8 Nov 2026 (TradingView Desktop
+  3.5.0 lives in `~/Desktop/Applications/`, not `/Applications`, so the launch script
+  does not find it; launch by hand with
+  `"/Users/trent/Desktop/Applications/TradingView.app/Contents/MacOS/TradingView" --remote-debugging-port=9222`).
+  The sweep rule's Pine compiled clean; tester details in the report's "TradingView
+  check" section. Basic plan: about one week of 1-minute history, one saved script.
+
 ## Next up (in order)
 
-1. **Install TradingView Desktop** from https://www.tradingview.com/desktop/ and sign in
-   (only you can do this). The TradingView tool in `tools/tradingview-mcp/` needs the
-   Desktop app, not the website.
-2. Launch it with the debug port, from the project folder:
-   `tools/tradingview-mcp/scripts/launch_tv_debug_mac.sh`
-3. Restart Claude Code so it loads the `tradingview` tool from `.mcp.json`, then ask
-   Claude to run `tv_health_check`.
-4. Have Claude compile `pvnt_bot/PVNT_SMC_Research.pine` through the tool and read the
-   Strategy Tester results. That is the first TradingView-side backtest.
-5. Commit and push the tool install so GitHub matches the Mac.
-6. Run the cheap VWAP measurement from `IDEAS.md` ("Does above VWAP predict anything?").
-7. Build the slower-bars experiment (5m and 15m) for both existing rules.
-8. Then the opening-range breakout on its own.
+1. Commit and push the TradingView results and page updates so GitHub matches the Mac.
+2. Decide whether to keep the $500-budget copy of the sweep script as your one saved
+   TradingView script (it is in the editor, unsaved) or discard it.
+3. Run the cheap VWAP measurement from `IDEAS.md` ("Does above VWAP predict anything?").
+4. Build the slower-bars experiment (5m and 15m) for both existing rules; TradingView can
+   now give a second opinion on whatever survives.
+5. Then the opening-range breakout on its own.
 
 ## How to run things
 

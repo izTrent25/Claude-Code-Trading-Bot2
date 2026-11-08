@@ -49,10 +49,13 @@ in the template below.
 - Timeframe and market: whatever the chart is set to
 - Why it might work: TradingView's Strategy Tester is a second, independent engine; it
   would let the Pine scripts be compiled and tested without hand-pasting
-- Status: installed in `tools/tradingview-mcp/` and registered in `.mcp.json`. Waiting on
-  you: install TradingView Desktop, launch it with the debug script, restart Claude Code.
-  Then the first job is compiling `pvnt_bot/PVNT_SMC_Research.pine` and reading its
-  Strategy Tester results. See `tools/README.md` for the network caveat.
+- Status: **working**. Installed in `tools/tradingview-mcp/`, registered in `.mcp.json`,
+  connected to TradingView Desktop 3.5.0 on 8 Nov 2026. First use: the sweep rule's Pine
+  script compiled clean and ran in the Strategy Tester (research_log rows 20–22). Known
+  Basic-plan limits: one saved script, about one week of one-minute bars, an upgrade popup
+  on Save. The tool's own compile button detection picks Save; the icon-only
+  Add to chart / Update on chart buttons are clicked by position instead. See
+  `tools/README.md` for the network caveat.
 
 ### Same ideas on slower bars
 - Source: Claude, from the 2010–2020 results

@@ -26,6 +26,10 @@ Development window is 2010–2020 (NQ bars as MNQ proxy). 2021+ is untouched.
 | 18 | 2026-11-08 | v2, risk $50 | How much does the $20 budget reject? | `vof_v2_rr15_risk50` | 7,991 trades, −$48,707, PF 0.58, −0.33R, 1.92 contracts avg, 0 of 11 years | bigger size, bigger loss; budget was not the problem |
 | 19 | 2026-11-08 | v2 random-direction control, 8 seeds | Does the VWAP/ORB direction call add anything? | `vof_v2_randdir` | 8 seeds (first run hung, relaunched): median −$40,834, PF 0.46, −0.37R, 32% wins, 0 of 8 profitable | real rule −0.34R: direction call worth ~0.03R, i.e. nothing |
 
+| 20 | 2026-11-08 | TradingView Strategy Tester, sweep rule Pine script as shipped ($50 budget), MNQ1! 1-minute, Basic plan history 2–6 Nov 2026 | First TradingView-side run via the tradingview-mcp tool | TradingView, no tag | compiled clean, 0 trades | $50 budget rejects almost every 2026 trade at MNQ ≈ 27,000 |
+| 21 | 2026-11-08 | Python engine on MNQ 2026 (Jan–4 Nov) at $50 and $500 budgets | Explain row 20 | `diag_mnq2026_risk50`, `diag_mnq2026_risk500` | $50: 3,783 signals, 159 trades, +$90, PF 1.02; $500: 460 trades, −$7,542, PF 0.80 | confirms the budget explanation; 2026 is still a loser at size |
+| 22 | 2026-11-08 | TradingView Strategy Tester, same Pine with $500 budget, 2–6 Nov 2026 | Does the tester produce trades once sized? | TradingView, no tag | 13 trades, +$990, PF 1.98, 54% wins, max DD $615 | pipeline works; 13 trades in 5 days is not evidence of anything |
+
 Ideas not yet tested (log them here before running):
 
 - Opening-range breakout alone, VWAP rule alone (helper's own favourites).
