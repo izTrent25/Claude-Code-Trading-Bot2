@@ -28,11 +28,12 @@ every working session.
   rule is retired. The runner takes `--bars N`.
 - **VWAP measurement (8 Nov):** being above or below session VWAP predicts nothing about
   the next hour. VWAP-bias filters are dead.
-- **Package state:** `pvnt_bot/` is the helper's starter, rebuilt from the PDF; 27 tests
-  pass; dashboard works at http://127.0.0.1:8765; it never places orders. The Pine script
-  has not been compiled in TradingView.
-- **Git:** `main` only. Last push had the data store and notes. Everything in `pvnt_bot/`,
-  `research/`, `IDEAS.md`, this file and `.gitignore` is **not committed yet**.
+- **Package state:** `pvnt_bot/` is the helper's starter, rebuilt from the PDF; 35 tests
+  pass; dashboard works at http://127.0.0.1:8765; it never places orders. The sweep rule's
+  Pine script compiles clean in TradingView and has run in its Strategy Tester.
+- **Git:** `main` only, on GitHub at `izTrent25/Claude-Code-Trading-Bot2`. Everything
+  through the exit-rule experiments is committed and pushed (commit `50f1998`, 8 Nov 2026).
+  GitHub matches the Mac.
 
 - **TradingView tool:** connected and working as of 8 Nov 2026 (TradingView Desktop
   3.5.0 lives in `~/Desktop/Applications/`, not `/Applications`, so the launch script
@@ -52,12 +53,34 @@ every working session.
 
 ## Next up (in order)
 
-1. Commit and push everything since the TradingView results (engine options, TJR files,
-   exit experiments, pages).
-2. The opening-range breakout on its own, on 5m and 15m bars, with a random control. The
+1. The opening-range breakout on its own, on 5m and 15m bars, with a random control. The
    old Step 1 log had an ORB rule as its best idea; this time it gets the honest test.
-3. Decide whether to keep the $500-budget copy of the sweep script as your one saved
-   TradingView script (it is in the editor, unsaved) or discard it.
+   Log it in `research/research_log.md` (row 50 onwards) before the first run.
+2. Decide whether to keep the $500-budget copy of the sweep script as your one saved
+   TradingView script (it is in the editor, unsaved, and on the MNQ1! 1-minute chart) or
+   discard it.
+3. Any idea in `IDEAS.md` you want to move ahead of the queue.
+
+## How to work with Claude on this project
+
+One chat per task. A chat gets slow and forgetful as it grows, and when it is compacted
+only a summary survives. The files in this repo are the real memory.
+
+- Start a research chat with "continue"; Claude reads this page first.
+- Start an idea chat with "new idea: ..."; it lands in `IDEAS.md`.
+- Before a chat gets long, or when a task is done, say "write that to the log" or
+  "update continue-here" so the result lands in a file. Then say "commit" and "push".
+- Name chats by kind, then the one thing they are for, so the sidebar stays readable:
+  - `Research: opening-range breakout`, `Research: FVG retest entry`
+  - `TradingView: load sweep script on chart`, `TradingView: alerts setup`
+  - `Bot: alert to Discord webhook` (later, once a rule survives)
+  - `Housekeeping: commit and push`, `Housekeeping: update continue-here`
+  - `Learn: what profit factor means` (throwaway question chats)
+
+  Add the date when the same job repeats, for example `Research: ORB, 10 Nov`.
+- Rules that hold in every chat: 2010–2020 only, log before running, never hide a loss,
+  never touch `data/futures/`, no broker or API keys until there is an account and an
+  explicit OK.
 
 ## How to run things
 
@@ -81,6 +104,19 @@ Backtest the sweep rule on 2010–2020 (about 3 minutes):
 
 ```bash
 .venv/bin/python research/run_backtest.py --symbol NQ --years 2010-2020 --mode research --tag smc_research_2010_2020
+```
+
+Same sweep rule on 15-minute bars (the runner resamples the 1-minute store):
+
+```bash
+.venv/bin/python research/run_backtest.py --symbol NQ --years 2010-2020 --mode research --bars 15 --tag smc_15m_research
+```
+
+Check the TradingView tool is talking to TradingView Desktop (launch it with the debug
+port first, see above):
+
+```bash
+cd tools/tradingview-mcp && node src/cli/index.js status
 ```
 
 Backtest the VWAP/ORB/FVG rule:
@@ -109,11 +145,14 @@ Results land in `research/results/<tag>/` (ignored by git; re-creatable).
 |---|---|
 | `data/futures/` | The paid-for 16-year minute data. Never regenerate, never delete. |
 | `pvnt_bot/` | The helper's research bot: engine, dashboard, Pine script, tests, docs. |
-| `pvnt_bot/vwap_orb_fvg.py` | Strategy 2. New strategies go next to it. |
-| `research/run_backtest.py` | Headless backtester over the data store. |
+| `pvnt_bot/vwap_orb_fvg.py` | Strategy 2 (retired). New strategies go next to it. |
+| `pvnt_bot/tjr.py`, `pvnt_bot/TJR_Research.pine` | TJR method as strict rules, retired 8 Nov 2026, kept for the record. |
+| `research/run_backtest.py` | Headless backtester over the data store (`--strategy`, `--bars`, `--set`). |
+| `research/vwap_measure.py` | The VWAP-tilt measurement (found no tilt). |
 | `research/research_log.md` | Every variant ever tested, numbered. |
 | `research/REPORT_2010_2020.md` | The written results, both strategies. |
 | `research/SPEC_*.md` | Exact rules for each strategy. |
 | `IDEAS.md` | Inbox for new ideas and the steps to integrate one. |
 | `notes/` | Plain-words summary of the helper's 52-page PDF. |
+| `tools/tradingview-mcp/` | Drives TradingView Desktop for compiling and testing Pine scripts; registered in `.mcp.json`. See `tools/README.md`. |
 | `~/Claude-Code-Trading-Bot-backup-2026-11-07/` | The old Step 1/2/3 project, kept outside git. |

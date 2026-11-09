@@ -131,5 +131,6 @@ in the template below.
 - Source: you (notifications are the goal)
 - The idea: once any rule survives, maintain a Pine v6 version and set TradingView alerts
   to your phone or a Discord webhook. The sweep rule already has a Pine file
-  (`pvnt_bot/PVNT_SMC_Research.pine`, uncompiled).
+  (`pvnt_bot/PVNT_SMC_Research.pine`, compiles clean; a $500-budget copy ran in the
+  Strategy Tester on 8 Nov 2026).
 - Status: waiting for a rule worth alerting on
