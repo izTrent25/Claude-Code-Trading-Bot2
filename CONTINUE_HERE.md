@@ -4,7 +4,7 @@ Read this first when picking the project back up. Tell Claude "continue" and it 
 from this page. Keep the "Where things stand" and "Next up" parts current at the end of
 every working session.
 
-## Where things stand (updated 8 November 2026)
+## Where things stand (updated 8 November 2026, evening)
 
 - **Goal:** a bot that sends trade notifications, or trades automatically, and is profitable.
   You have no prop-firm account yet and use TradingView only, so broker connections are on
@@ -51,11 +51,22 @@ every working session.
   `breakeven_r`, `trail_bars`, `max_consecutive_losses`, explicit `target` and `limit`
   proposals, all off by default and covered by tests (35 pass).
 
+- **Strategy 3, the opening-range breakout on its own (8 Nov evening):** `research/SPEC_orb.md`,
+  `pvnt_bot/orb.py`, research_log rows 50–72, report section "Strategy 3". Twelve variants,
+  all lose in 10 or 11 of 11 years (best PF 0.89, −0.07R), none beats its coin-toss twin.
+  **Closed.** The old Step 1 "+$42.9k" ORB does not survive honest costs. A Pine v6 version
+  (`pvnt_bot/ORB_Research.pine`) is written but not compiled or loaded: you said not yet.
+- **New house rule from the main chat (8 Nov):** every strategy also gets a Pine v6 version on
+  the TradingView chart as a second opinion. The Python 2010–2020 result with its random
+  control stays the verdict. Loading a script replaces the Pine editor contents, so ask first.
+
 ## Next up (in order)
 
-1. The opening-range breakout on its own, on 5m and 15m bars, with a random control. The
-   old Step 1 log had an ORB rule as its best idea; this time it gets the honest test.
-   Log it in `research/research_log.md` (row 50 onwards) before the first run.
+1. Pick the next idea. Four intraday entry ideas on NQ have now given the same answer (coin
+   flip before costs). The inbox still holds the FVG retest entry, a structure-based bias and
+   partial exits, all refinements of the closed sweep rule; something structurally different
+   (for example a mean-reversion idea) is more likely to teach us anything. Say "new idea: ..."
+   to add one, then open a `Research: <name>` chat. Rows start at 73.
 2. Decide whether to keep the $500-budget copy of the sweep script as your one saved
    TradingView script (it is in the editor, unsaved, and on the MNQ1! 1-minute chart) or
    discard it.
@@ -119,6 +130,12 @@ port first, see above):
 cd tools/tradingview-mcp && node src/cli/index.js status
 ```
 
+Backtest the opening-range breakout (15-minute bars, 2-height target; about a minute):
+
+```bash
+.venv/bin/python research/run_backtest.py --symbol NQ --years 2010-2020 --strategy orb --bars 15 --set orb_target_mult=2 --tag orb_15m_t2
+```
+
 Backtest the VWAP/ORB/FVG rule:
 
 ```bash
@@ -147,6 +164,7 @@ Results land in `research/results/<tag>/` (ignored by git; re-creatable).
 | `pvnt_bot/` | The helper's research bot: engine, dashboard, Pine script, tests, docs. |
 | `pvnt_bot/vwap_orb_fvg.py` | Strategy 2 (retired). New strategies go next to it. |
 | `pvnt_bot/tjr.py`, `pvnt_bot/TJR_Research.pine` | TJR method as strict rules, retired 8 Nov 2026, kept for the record. |
+| `pvnt_bot/orb.py`, `pvnt_bot/ORB_Research.pine`, `research/SPEC_orb.md` | Strategy 3, the opening-range breakout alone, closed 8 Nov 2026. Pine version not yet loaded. |
 | `research/run_backtest.py` | Headless backtester over the data store (`--strategy`, `--bars`, `--set`). |
 | `research/vwap_measure.py` | The VWAP-tilt measurement (found no tilt). |
 | `research/research_log.md` | Every variant ever tested, numbered. |

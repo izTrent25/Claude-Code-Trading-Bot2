@@ -98,7 +98,13 @@ in the template below.
 - Timeframe and market: 5m and 15m NQ
 - Why it might work: simplest version of what the helper says he actually trades, and the
   only idea in the old log with a multi-year positive result
-- Status: inbox, **next up**
+- Status: **tested and closed** 8 Nov 2026 (research_log rows 50–72; report section
+  "Strategy 3"). Twelve variants on 5m and 15m bars, targets 1× and 2× the range height
+  measured from the edge or from the entry, range stop or 0.10 × ATR stop, reversal allowed,
+  zero costs: every one loses in 10 or 11 of 11 years (best PF 0.89, −0.07R) and none beats
+  its random-direction twin. The old +$42.9k does not survive honest costs. Spec
+  `research/SPEC_orb.md`, code `pvnt_bot/orb.py`, Pine `pvnt_bot/ORB_Research.pine` (written,
+  not compiled or loaded at your request).
 
 ### Does "above VWAP" predict anything?
 - Source: Claude

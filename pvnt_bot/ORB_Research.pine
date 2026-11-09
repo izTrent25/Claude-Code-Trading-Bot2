@@ -1,0 +1,130 @@
+//@version=6
+strategy("ORB Research v1 — paper research", overlay=true,
+     initial_capital=50000, currency=currency.USD, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=1,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.75,
+     slippage=2, backtest_fill_limits_assumption=1,
+     process_orders_on_close=false, calc_on_every_tick=false, calc_on_order_fills=false,
+     margin_long=1, margin_short=1)
+// Opening-range breakout on its own, for a FIVE- or FIFTEEN-MINUTE chart. Rules: research/SPEC_orb.md;
+// Python twin: pvnt_bot/orb.py. The first `Range minutes` after 08:30 Chicago make a high and a low;
+// the first bar that CLOSES beyond the range gives the direction (market entry at the next bar's open);
+// stop one tick outside the far side of the range (or k x daily ATR); target N range heights measured
+// from the range edge (v1) or from the estimated entry (v1b); no time stop; flat at 14:55 Chicago.
+// One trade a day unless `Max trades per day` is 2, in which case the opposite breakout may be taken
+// after the first trade. Costs: $0.75 per contract per side and 2 ticks of slippage, set above; the
+// Python research runs use a $500 budget and up to 2 contracts, this script trades a fixed 1 contract.
+// Differences from the Python engine (not tick-for-tick parity): TradingView's intrabar fill order on a
+// bar that touches both stop and target, limit fills on a touch versus the engine's one-tick
+// penetration, the tester's own drawdown maths, and the daily ATR comes from TradingView's daily bars
+// (a simple mean of true ranges, as in Python, but TradingView's session boundaries).
+if barstate.isfirst and (not timeframe.isminutes or (timeframe.multiplier != 5 and timeframe.multiplier != 15))
+    runtime.error("Use a standard 5-minute or 15-minute chart for this research strategy.")
+
+string tz         = input.string("America/Chicago", "Session timezone")
+int    rangeStart = input.int(830, "Opening range start HHMM", minval=0, maxval=2359)
+int    rangeMins  = input.int(15, "Range minutes", minval=5, step=5)
+int    lastClose  = input.int(1100, "Breakout bar must close by HHMM", minval=0, maxval=2359)
+float  targetMult = input.float(1.0, "Target in range heights (0 = none)", minval=0, step=0.5)
+string targetFrom = input.string("Range edge", "Target measured from", options=["Range edge", "Estimated entry"])
+string stopMode   = input.string("Range", "Stop", options=["Range", "ATR"])
+float  atrMult    = input.float(0.10, "ATR stop: multiple of the daily ATR", minval=0.01, step=0.05)
+int    atrLen     = input.int(14, "ATR stop: completed sessions", minval=1)
+int    maxTrades  = input.int(1, "Max trades per day (2 allows the reversal)", minval=1, maxval=2)
+int    flattenAt  = input.int(1455, "Flatten HHMM", minval=0, maxval=2359)
+int    qty        = input.int(1, "Contracts", minval=1)
+int    slipTicks  = input.int(2, "Estimated entry: slippage ticks (geometry only)", minval=0)
+int    startDate  = input.time(timestamp("01 Jan 2010 00:00 +0000"), "Test begins")
+int    endDate    = input.time(timestamp("31 Dec 2030 23:59 +0000"), "Test ends")
+
+if barstate.isfirst and rangeMins % timeframe.multiplier != 0
+    runtime.error("Range minutes must be a whole number of chart bars.")
+
+f_minutes(int hhmm) => math.floor(hhmm / 100) * 60 + hhmm % 100
+
+float tick      = syminfo.mintick
+bool  inDates   = time >= startDate and time_close <= endDate
+int   clockMin  = hour(time, tz) * 60 + minute(time, tz)
+int   closeMin  = hour(time_close, tz) * 60 + minute(time_close, tz)
+int   rangeFrom = f_minutes(rangeStart)
+int   rangeTo   = rangeFrom + rangeMins
+int   lastMin   = f_minutes(lastClose)
+int   flattenMin = f_minutes(flattenAt)
+int   expectedBars = int(math.max(1, math.floor(rangeMins / timeframe.multiplier)))
+int   dayKey    = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+bool  newDay    = ta.change(dayKey) != 0
+
+// Daily ATR as a simple mean of true ranges over completed sessions, like orb.py. [1] with lookahead_on = no peeking.
+float dailyAtr = request.security(syminfo.tickerid, "D", ta.sma(ta.tr(true), atrLen)[1], lookahead=barmerge.lookahead_on)
+
+var float orHigh = na
+var float orLow  = na
+var int   orBars = 0
+var bool  rangeDecided = false
+var bool  rangeOk = false
+var int   breakouts = 0
+var int   lastSide = 0
+var float tradeStop = na
+var float tradeTarget = na
+
+if newDay
+    orHigh := na
+    orLow := na
+    orBars := 0
+    rangeDecided := false
+    rangeOk := false
+    breakouts := 0
+    lastSide := 0
+    strategy.cancel_all()
+
+bool inRange = clockMin >= rangeFrom and clockMin < rangeTo
+if inRange
+    orHigh := na(orHigh) ? high : math.max(orHigh, high)
+    orLow := na(orLow) ? low : math.min(orLow, low)
+    orBars += 1
+if clockMin >= rangeTo and not rangeDecided
+    rangeDecided := true
+    rangeOk := not na(orHigh) and orBars >= expectedBars
+
+// session flatten: close at this bar's close, as the Python engine does
+if clockMin >= flattenMin or not inDates
+    strategy.cancel_all()
+    if strategy.position_size != 0
+        strategy.close_all(comment="Session flatten", immediately=true)
+
+bool longSignal = false
+bool shortSignal = false
+bool windowOk = clockMin >= rangeTo and clockMin < lastMin and closeMin <= lastMin
+if barstate.isconfirmed and rangeOk and windowOk and inDates and breakouts < maxTrades
+    int side = close > orHigh ? 1 : close < orLow ? -1 : 0
+    if side != 0 and side != lastSide
+        breakouts += 1          // the day's breakout is spent whether or not a trade results
+        lastSide := side
+        float height = orHigh - orLow
+        float est = close + side * slipTicks * tick
+        float stopPrice = stopMode == "Range" ? (side == 1 ? orLow - tick : orHigh + tick) :
+             (side == 1 ? math.floor((est - atrMult * dailyAtr) / tick) * tick : math.ceil((est + atrMult * dailyAtr) / tick) * tick)
+        float base = targetFrom == "Estimated entry" ? est : (side == 1 ? orHigh : orLow)
+        float targetPrice = targetMult > 0 ? base + side * targetMult * height : na
+        bool atrMissing = stopMode == "ATR" and na(dailyAtr)
+        bool beyondTarget = targetMult > 0 and side * (targetPrice - est) <= 0
+        bool beyondStop = side * (est - stopPrice) <= 0
+        if not atrMissing and not beyondTarget and not beyondStop and strategy.position_size == 0
+            tradeStop := stopPrice
+            tradeTarget := na(targetPrice) ? na : math.round_to_mintick(targetPrice)
+            longSignal := side == 1
+            shortSignal := side == -1
+            if side == 1
+                strategy.entry("L", strategy.long, qty=qty)
+                strategy.exit("LX", from_entry="L", stop=tradeStop, limit=tradeTarget)
+            else
+                strategy.entry("S", strategy.short, qty=qty)
+                strategy.exit("SX", from_entry="S", stop=tradeStop, limit=tradeTarget)
+
+plot(rangeDecided and rangeOk ? orHigh : na, "Opening range high", color=color.new(color.blue, 0), style=plot.style_linebr)
+plot(rangeDecided and rangeOk ? orLow : na, "Opening range low", color=color.new(color.blue, 0), style=plot.style_linebr)
+plot(strategy.position_size != 0 ? tradeStop : na, "Stop", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? tradeTarget : na, "Target", color=color.green, style=plot.style_linebr)
+plotshape(longSignal, title="Long breakout", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(shortSignal, title="Short breakout", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+bgcolor(inRange ? color.new(color.blue, 90) : na)
