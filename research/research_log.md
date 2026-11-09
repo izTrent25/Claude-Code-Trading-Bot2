@@ -81,8 +81,8 @@ Development window is 2010–2020 (NQ bars as MNQ proxy). 2021+ is untouched.
 | 67 | 2026-11-08 | ORB v1b, 5m bars, target 2×H from entry | same | `orb_5m_t2e` | 2,633 trades, −$17,574, PF 0.87, −0.08R, 41.6% wins, 40.1 bars/trade, 1 of 11 years (2020 +$1,026) | loses |
 | 68 | 2026-11-08 | Random-direction control of row 64, 8 seeds | baseline | `orb_15m_t1e_randdir` | 8 seeds, median −$18,534 (−$25,840 to −$9,174), PF 0.84, −0.087R (−0.103 to −0.070), 0 of 8 profitable | real rule −0.093R: same as random |
 | 69 | 2026-11-08 | Random-direction control of row 65, 8 seeds | baseline | `orb_15m_t2e_randdir` | 8 seeds, median −$12,263 (−$18,810 to −$2,751), PF 0.91, -0.060R (-0.070 to -0.049), 0 of 8 profitable | real rule -0.076R: slightly worse than random |
-| 70 | 2026-11-08 | Random-direction control of row 66, 8 seeds | baseline | `orb_5m_t1e_randdir` | pending | pending |
-| 71 | 2026-11-08 | Random-direction control of row 67, 8 seeds | baseline | `orb_5m_t2e_randdir` | pending | pending |
+| 70 | 2026-11-08 | Random-direction control of row 66, 8 seeds | baseline | `orb_5m_t1e_randdir` | 8 seeds, median −$20,038 (−$29,952 to −$12,772), PF 0.83, -0.103R (-0.125 to -0.072), 0 of 8 profitable | real rule -0.119R: slightly worse than random |
+| 71 | 2026-11-08 | Random-direction control of row 67, 8 seeds | baseline | `orb_5m_t2e_randdir` | 8 seeds, median −$9,516 (−$23,795 to −$3,466), PF 0.93, -0.074R (-0.104 to -0.045), 0 of 8 profitable | real rule -0.079R: same as random |
 | 72 | 2026-11-08 | Pine v6 version of ORB v1/v1b, `pvnt_bot/ORB_Research.pine` (inputs for range minutes, target multiple and origin, stop mode, entry cutoff, max trades; 1 contract, $0.75/side, 2 ticks), for the 5m or 15m chart | New house rule from the main chat: every strategy also gets a TradingView version as a second opinion and the user's eyes | TradingView: `pine check`, then Strategy Tester vs the Python trades on overlapping days | file written 8 Nov; **not compiled and not loaded**: the user said not to put it in TradingView yet | waiting for the user's go-ahead |
 
 Ideas not yet tested (log them here before running):
