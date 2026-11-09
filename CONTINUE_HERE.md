@@ -59,18 +59,53 @@ every working session.
 - **New house rule from the main chat (8 Nov):** every strategy also gets a Pine v6 version on
   the TradingView chart as a second opinion. The Python 2010–2020 result with its random
   control stays the verdict. Loading a script replaces the Pine editor contents, so ask first.
+- **TradingView hunt (8 Nov, late evening):** searched TradingView's public strategies for
+  anything "very profitable". Four candidates are written up at the end of `IDEAS.md`; the
+  strongest by far is the **noise-area intraday momentum** rule (Zarattini, Aziz & Barbon 2024,
+  17 years of SPY evidence after costs, two open-source NQ builds). Nothing tested yet. The
+  rest of what TradingView shows as "profitable" is unverifiable or already-closed ideas.
+- **Strategy 4, SuperTrend (8 Nov, night):** the first script you brought from TradingView,
+  rebuilt line for line (`pvnt_bot/supertrend.py`, `research/SPEC_supertrend.md`, rows 73–83,
+  report section "Strategy 4"). Loses on 1m, 5m and 15m bars, as published and as a day-session
+  version; coin-toss twins match it; flat with zero costs. **Closed.** The engine now has three
+  more research options, all off by default: `hold_overnight`, `intrabar_stop=false` and a
+  `check_exit(position, bar)` hook so a strategy can end a trade at a bar's close; 50 tests pass.
+- **Working style now:** you bring strategies from TradingView, each gets the same pipeline (spec,
+  log, code, sanity run, 2010–2020 with a coin-toss control, written up win or lose). The
+  noise-area momentum spec (`research/SPEC_noise_momentum.md`) is written but unconfirmed, parked.
+- **The six evidence-backed candidates (9 Nov, small hours):** gap fade, last-half-hour momentum,
+  overnight drift, turn of the month, noise-area momentum, first-candle ORB. Rows 85–120, report
+  section "The six evidence-backed candidates". Five carry real information (positive 7–10 of 11
+  years before costs, beating every random seed); micro-contract costs of about $3.50 a trade eat
+  edges of $1.50–$5. **Turn of the month passes the frozen pass mark** (121 trades, +$5,731,
+  8 of 11 years) and has **earned the 2021–2026 test, not run**; 2020 is two thirds of it and it
+  holds overnight. Noise-area momentum is the strongest intraday signal (+$11k before costs,
+  +$3.6k after, 3 of 11 years). The rest are closed.
+- **Strategy 5, PVNT flow entry:** spec written (`research/SPEC_pvnt_flow.md`), waiting for your yes.
+- **Engine:** 62 tests pass; new research options `hold_overnight`, `intrabar_stop`, `check_exit`
+  hook; the runner has a strategy registry (`REGISTRY` in `research/run_backtest.py`).
+- **Sweep rule revisited (9 Nov):** you want to go back to PVNT SMC Research v0.1. Its Pine script
+  now accepts 1-, 5- and 15-minute charts (gap detection uses the chart's bar length); bar-count
+  settings scale with the chart. The Python already ran on 5m/15m through `--bars` (rows 24–25, 43–49).
 
 ## Next up (in order)
 
-1. Pick the next idea. Four intraday entry ideas on NQ have now given the same answer (coin
-   flip before costs). The inbox still holds the FVG retest entry, a structure-based bias and
-   partial exits, all refinements of the closed sweep rule; something structurally different
-   (for example a mean-reversion idea) is more likely to teach us anything. Say "new idea: ..."
-   to add one, then open a `Research: <name>` chat. Rows start at 73.
-2. Decide whether to keep the $500-budget copy of the sweep script as your one saved
-   TradingView script (it is in the editor, unsaved, and on the MNQ1! 1-minute chart) or
-   discard it.
-3. Any idea in `IDEAS.md` you want to move ahead of the queue.
+1. **Turn of the month, 2021–2026 test: held back.** You decided on 9 November 2026 ("Not yet",
+   relayed from the tracker chat) not to spend the untouched years on it yet. It keeps its earned
+   right to that test until you say go. 2021–2026 stays untouched for everything.
+2. **Your yes or no on Strategy 5, PVNT flow entry** (`research/SPEC_pvnt_flow.md`); the Pine
+   version already exists (`pvnt_bot/PVNT_Flow_Research.pine`, compiles clean); the Python twin
+   needs a partial-exit option in the engine. Expect little (the indicator's own scorecard: 20%
+   wins).
+3. **Noise-area momentum's cost line**, as its own logged hypothesis if wanted: the signal is real,
+   the micro's $3.50 a trade is the problem. Candidates: fewer trades (first signal of the day only),
+   a limit entry instead of market. Tuning risk: write the rule before looking at results. Rows
+   start at 121.
+4. Cheaper ideas from the TradingView hunt if wanted: UT Bot trailing line, VWAP-band mean
+   reversion. Or paste the next TradingView script (its tester defaults to zero costs).
+5. Decide whether to keep the $500-budget copy of the sweep script as your one saved TradingView
+   script (it is in the editor, unsaved, and on the MNQ1! 1-minute chart) or discard it.
+6. Any idea in `IDEAS.md` you want to move ahead of the queue.
 
 ## How to work with Claude on this project
 
@@ -136,6 +171,12 @@ Backtest the opening-range breakout (15-minute bars, 2-height target; about a mi
 .venv/bin/python research/run_backtest.py --symbol NQ --years 2010-2020 --strategy orb --bars 15 --set orb_target_mult=2 --tag orb_15m_t2
 ```
 
+Backtest the SuperTrend script as published (holds overnight) on 15-minute bars:
+
+```bash
+.venv/bin/python research/run_backtest.py --symbol NQ --years 2010-2020 --strategy supertrend --bars 15 --tag st_a_15m
+```
+
 Backtest the VWAP/ORB/FVG rule:
 
 ```bash
@@ -165,6 +206,9 @@ Results land in `research/results/<tag>/` (ignored by git; re-creatable).
 | `pvnt_bot/vwap_orb_fvg.py` | Strategy 2 (retired). New strategies go next to it. |
 | `pvnt_bot/tjr.py`, `pvnt_bot/TJR_Research.pine` | TJR method as strict rules, retired 8 Nov 2026, kept for the record. |
 | `pvnt_bot/orb.py`, `pvnt_bot/ORB_Research.pine`, `research/SPEC_orb.md` | Strategy 3, the opening-range breakout alone, closed 8 Nov 2026. Pine version not yet loaded. |
+| `pvnt_bot/supertrend.py`, `research/SPEC_supertrend.md` | Strategy 4, SuperTrend from TradingView, closed 8 Nov 2026. |
+| `pvnt_bot/{gap_fade,last_half_hour,overnight_drift,turn_of_month,noise_momentum,orb_candle}.py`, `research/SPEC_*.md` | The six evidence-backed candidates, tested 9 Nov 2026. |
+| `research/SPEC_pvnt_flow.md` | Strategy 5, PVNT flow entry, spec only, awaiting your yes. |
 | `research/run_backtest.py` | Headless backtester over the data store (`--strategy`, `--bars`, `--set`). |
 | `research/vwap_measure.py` | The VWAP-tilt measurement (found no tilt). |
 | `research/research_log.md` | Every variant ever tested, numbered. |

@@ -144,20 +144,23 @@ class Engine:
         if self.last and b.dt()<=self.last.dt():raise ValueError('Bars must be strictly increasing')
         old=self.last; self.last=b; self.count+=1; self.recent.append(b)
         day,clock=self.session(b)
+        hold=bool(self.c.get('hold_overnight',False))  # research option: positions and proposals survive day changes and session breaks
         if day!=self.day:
-            if self.position:self.close(b.open,'session gap flatten')
+            if self.position and not hold:self.close(b.open,'session gap flatten')
             if self.day is not None:
                 self.floor=max(self.floor,min(self.c['floor_cap'],self.balance-self.c['loss_distance']))
             self.day=day; self.day_start=self.balance; self.day_trades=0; self.daily_halted=False
-            self.pending=None; self.strategy.setup=None; self.day_loss_streak=0
+            if not hold: self.pending=None
+            self.strategy.setup=None; self.day_loss_streak=0
         if old and (b.dt()-old.dt()).total_seconds()>self.c.get('bar_seconds',60):
-            self.pending=None; self.strategy.setup=None
+            if not hold: self.pending=None
+            self.strategy.setup=None
             self.strategy.bars.clear(); self.strategy.building.clear(); self.strategy.context={15:None,90:None}
-            if self.position:self.close(b.open,'data gap flatten')
-            self.event('Gap: canceled proposal, cleared strategy context')
+            if self.position and not hold:self.close(b.open,'data gap flatten')
+            self.event('Gap: cleared strategy context' if hold else 'Gap: canceled proposal, cleared strategy context')
         if self.pending and not self.position:
             s=self.pending; side=s['side']; tick=self.c['tick_size']
-            in_window=not self.halted and not self.daily_halted and self.c['entry_start']<=clock<self.c['entry_end']
+            in_window=not self.halted and not self.daily_halted and (hold or self.c['entry_start']<=clock<self.c['entry_end'])
             if s.get('limit') is not None:
                 # Resting limit order (research option). Fills only on a one-tick penetration, at the limit
                 # price, no favourable improvement. Dies if the stop level trades first, if the target is
@@ -181,14 +184,15 @@ class Engine:
             cut=max(self.floor+self.c['safety_buffer'],self.day_start-self.c['daily_loss'])
             guard_price=p['entry']+(cut+self.c['commission_per_side']*p['qty']-self.balance)*side*self.c['tick_size']/(self.c['tick_value']*p['qty'])
             effective=max(p['stop'],guard_price) if side==1 else min(p['stop'],guard_price)
-            triggered=(b.low<=effective if side==1 else b.high>=effective)
+            # research option intrabar_stop=false: the stop is kept for sizing and the record only, never filled between bars
+            triggered=self.c.get('intrabar_stop',True) and (b.low<=effective if side==1 else b.high>=effective)
             if triggered:
                 fill=min(b.open,effective) if side==1 else max(b.open,effective)
                 self.close(fill,'risk guard' if effective!=p['stop'] else 'stop')
             elif p['target'] is not None and (b.high>=p['target']+self.c['tick_size'] if side==1 else b.low<=p['target']-self.c['tick_size']):
                 self.close(p['target'],'target')
-            elif clock>=self.c['flatten_time'] or p['bars']>=self.c['max_hold_bars']:
-                self.close(b.close,'session flatten' if clock>=self.c['flatten_time'] else 'time stop')
+            elif (clock>=self.c['flatten_time'] and not hold) or p['bars']>=self.c['max_hold_bars']:
+                self.close(b.close,'session flatten' if (clock>=self.c['flatten_time'] and not hold) else 'time stop')
             # optional management (research): break-even after +X R, then trail behind the last N bars.
             # Computed from this bar, applied from the next bar, so intrabar order is never assumed.
             p=self.position
@@ -210,7 +214,10 @@ class Engine:
             self.daily_halted=True; self.pending=None
             if self.position:self.close(b.close,'daily guard')
         signal=self.strategy.on_bar(b)
-        if signal and not self.position and not self.halted and not self.daily_halted and self.c['entry_start']<=clock<self.c['entry_end']:
+        if self.position and hasattr(self.strategy,'check_exit'):  # research option: the strategy may end the trade at this bar's close
+            why=self.strategy.check_exit(self.position,b)
+            if why: self.close(b.close,why)
+        if signal and not self.position and not self.halted and not self.daily_halted and (hold or self.c['entry_start']<=clock<self.c['entry_end']):
             self.pending=signal; self.event('Signal confirmed; next-bar market proposal')
         eq=self.equity_at(b.close); self.peak=max(self.peak,eq); self.max_dd=max(self.max_dd,self.peak-eq)
         self.equity.append({'time':b.timestamp,'value':round(eq,2)})

@@ -1,0 +1,267 @@
+//@version=6
+strategy("PVNT Flow Research v1 — paper research", overlay=true,
+     initial_capital=50000, currency=currency.USD, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=3,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.75,
+     slippage=2, backtest_fill_limits_assumption=1,
+     process_orders_on_close=false, calc_on_every_tick=false, calc_on_order_fills=false,
+     margin_long=1, margin_short=1, max_bars_back=500)
+// "PVNT flow entry", version 1, for a FIVE-MINUTE chart. Rules: research/SPEC_pvnt_flow.md.
+// The closest testable reading of the trade shape in Perky's gold screenshot and video (not the
+// PVNT indicator, whose logic is private):
+//   structure shift  = a bar body-closes through the last confirmed swing high that was a LOWER high
+//                      (longs; mirror for shorts), with displacement (body >= 0.8 x average 5m range);
+//   the gap          = the most recent fair value gap inside the move from the swing low that started
+//                      the shift up to the shift bar (one more bar allowed); min size max(2 ticks, 0.3 x avg range);
+//   entry            = resting limit at the top of the gap (or its midpoint), alive 24 bars, cancelled if
+//                      the stop level trades first, the gap is closed through, or the window ends;
+//   stop             = one tick beyond the swing low/high that started the shift;
+//   exits in thirds  = 1/3 at the nearer of 1R and the nearest swing level, then stop to break-even,
+//                      1/3 at 2R, 1/3 at the next swing level beyond 2R or the 14:55 flatten.
+// Entries 08:30-11:00 Chicago, structure tracked from 06:00, at most 2 trades a day, 3 contracts.
+// Costs: $0.75 per contract per side and 2 ticks of slippage, set above. TradingView's own tester
+// defaults to ZERO costs, so this script sets them explicitly.
+// The exits input also offers the screenshot's literal targets (0.1R / 0.3R / 1.1R) and a single 2R exit,
+// the two logged variants, so you can see what each does on the chart.
+// Python twin: pvnt_bot/pvnt_flow.py (built in the strategy chat after your yes on the spec). Not
+// tick-for-tick parity: TradingView's intrabar fill order, limit fills on a one-tick penetration, and
+// its own drawdown maths differ from the engine.
+if barstate.isfirst and (not timeframe.isminutes or timeframe.multiplier != 5)
+    runtime.error("Use a standard 5-minute chart for this research strategy.")
+
+string tz         = input.string("America/Chicago", "Session timezone")
+int    structFrom = input.int(600, "Track structure from HHMM", minval=0, maxval=2359)
+int    winStart   = input.int(830, "Entry window start HHMM", minval=0, maxval=2359)
+int    winEnd     = input.int(1100, "Entry window end HHMM", minval=0, maxval=2359)
+int    flattenAt  = input.int(1455, "Flatten HHMM", minval=0, maxval=2359)
+float  dispMult   = input.float(0.8, "Shift body / average 5m range", minval=0, step=0.1)
+int    rangeLen   = input.int(12, "Average range length (bars)", minval=1)
+float  gapMult    = input.float(0.3, "Minimum gap / average range", minval=0, step=0.1)
+int    gapTicks   = input.int(2, "Minimum gap (ticks)", minval=1)
+string limitAt    = input.string("Gap top", "Limit price", options=["Gap top", "Gap midpoint"])
+int    expireBars = input.int(24, "Limit lifetime (5m bars)", minval=1)
+int    maxTrades  = input.int(2, "Max trades per day", minval=1)
+string exitMode   = input.string("Thirds", "Exits", options=["Thirds", "Screenshot 0.1R/0.3R/1.1R", "Single 2R"])
+int    qtyThird   = input.int(1, "Contracts per third", minval=1)
+int    startDate  = input.time(timestamp("01 Jan 2010 00:00 +0000"), "Test begins")
+int    endDate    = input.time(timestamp("31 Dec 2030 23:59 +0000"), "Test ends")
+
+float tick     = syminfo.mintick
+int   clock    = hour(time, tz) * 100 + minute(time, tz)
+bool  inDates  = time >= startDate and time_close <= endDate
+int   dayKey   = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+bool  newDay   = ta.change(dayKey) != 0
+float avgRange = ta.sma(high - low, rangeLen)[1]
+int   fullQty  = 3 * qtyThird
+
+// ---------------------------------------------------------------- 5m structure, tracked from 06:00
+var float lastSH    = na
+var float prevSH    = na
+var int   lastSHbar = na
+var float lastSL    = na
+var float prevSL    = na
+var int   lastSLbar = na
+var array<float> swingHighs = array.new_float()
+var array<float> swingLows  = array.new_float()
+if clock == structFrom
+    lastSH := na
+    prevSH := na
+    lastSHbar := na
+    lastSL := na
+    prevSL := na
+    lastSLbar := na
+    array.clear(swingHighs)
+    array.clear(swingLows)
+if clock >= structFrom
+    if high[1] > high[2] and high[1] > high
+        prevSH := lastSH
+        lastSH := high[1]
+        lastSHbar := bar_index - 1
+        array.push(swingHighs, high[1])
+        if array.size(swingHighs) > 40
+            array.shift(swingHighs)
+    if low[1] < low[2] and low[1] < low
+        prevSL := lastSL
+        lastSL := low[1]
+        lastSLbar := bar_index - 1
+        array.push(swingLows, low[1])
+        if array.size(swingLows) > 40
+            array.shift(swingLows)
+
+// ---------------------------------------------------------------- helpers
+f_nearestBeyond(array<float> levels, float px, int s) =>
+    // the closest level strictly beyond px in direction s (1 = above, -1 = below)
+    float best = na
+    if array.size(levels) > 0
+        for v in levels
+            float d = (v - px) * s
+            if d > 0 and (na(best) or d < (best - px) * s)
+                best := v
+    best
+
+f_extremeSince(int fromBar, int s) =>
+    // lowest low (s = 1) or highest high (s = -1) from fromBar to the current bar
+    int span = math.min(bar_index - fromBar, 300)
+    float e = s == 1 ? low : high
+    if span > 0
+        for i = 1 to span
+            e := s == 1 ? math.min(e, low[i]) : math.max(e, high[i])
+    e
+
+f_findGap(int s, int fromBar, float minGap) =>
+    // most recent three-bar gap whose oldest bar is not before fromBar
+    float b = na
+    float t = na
+    int span = math.min(bar_index - fromBar, 300)
+    if span >= 2
+        for i = 0 to span - 2
+            if s == 1 and low[i] - high[i + 2] >= minGap
+                b := high[i + 2]
+                t := low[i]
+                break
+            if s == -1 and low[i + 2] - high[i] >= minGap
+                b := high[i]
+                t := low[i + 2]
+                break
+    [b, t]
+
+f_targets(int s, float entry, float risk) =>
+    float ta1 = na
+    float ta2 = na
+    float ta3 = na
+    if exitMode == "Thirds"
+        float near = f_nearestBeyond(s == 1 ? swingHighs : swingLows, entry, s)
+        ta1 := not na(near) and s * (near - entry) < risk ? near : entry + s * risk
+        ta2 := entry + s * 2 * risk
+        ta3 := f_nearestBeyond(s == 1 ? swingHighs : swingLows, ta2, s)   // na = hold to the flatten
+    else if exitMode == "Screenshot 0.1R/0.3R/1.1R"
+        ta1 := entry + s * 0.1 * risk
+        ta2 := entry + s * 0.3 * risk
+        ta3 := entry + s * 1.1 * risk
+    else
+        ta1 := entry + s * 2 * risk
+        ta2 := ta1
+        ta3 := ta1
+    [math.round_to_mintick(ta1), math.round_to_mintick(ta2), na(ta3) ? na : math.round_to_mintick(ta3)]
+
+// ---------------------------------------------------------------- state
+var int   state     = 0      // 0 idle, 1 shift seen and no gap yet (one more bar allowed), 3 limit working, 4 in a trade
+var int   side      = 0
+var float structure = na
+var int   startBar  = na
+var float extreme   = na
+var float zoneBot   = na
+var float zoneTop   = na
+var int   orderBar  = na
+var float limitPx   = na
+var float tradeStop = na
+var float t1        = na
+var float t2        = na
+var float t3        = na
+var bool  beDone    = false
+var int   entries   = 0
+if newDay
+    entries := 0
+
+bool inWindow = clock >= winStart and clock < winEnd
+bool canTrade = inDates and entries < maxTrades and strategy.position_size == 0
+bool shiftNow = false
+
+if barstate.isconfirmed and inDates
+    bool tryGap = false
+    if state == 0
+        if inWindow and canTrade and not na(avgRange)
+            float body = close - open
+            bool shiftUp = not na(lastSH) and not na(prevSH) and lastSH < prevSH and close > lastSH and close[1] <= lastSH and body >= dispMult * avgRange
+            bool shiftDn = not na(lastSL) and not na(prevSL) and lastSL > prevSL and close < lastSL and close[1] >= lastSL and -body >= dispMult * avgRange
+            if shiftUp or shiftDn
+                side := shiftUp ? 1 : -1
+                structure := shiftUp ? lastSH : lastSL
+                startBar := shiftUp ? lastSHbar : lastSLbar
+                extreme := f_extremeSince(startBar, side)
+                shiftNow := true
+                tryGap := true
+    else if state == 1
+        tryGap := true
+    else if state == 3
+        if strategy.position_size != 0
+            state := 4
+        else
+            bool dead = side == 1 ? low <= tradeStop : high >= tradeStop
+            bool closedThrough = side == 1 ? close < zoneBot : close > zoneTop
+            bool expired = bar_index - orderBar >= expireBars
+            if dead or closedThrough or expired or clock >= winEnd
+                strategy.cancel_all()
+                state := 0
+    else if state == 4
+        if strategy.position_size == 0
+            state := 0
+        else if not beDone and exitMode != "Single 2R" and math.abs(strategy.position_size) < fullQty
+            // the first third is out: stop to break-even on the rest, applied from this bar on
+            beDone := true
+            tradeStop := strategy.position_avg_price
+            if side == 1
+                strategy.exit("X2", from_entry="L", qty=qtyThird, stop=tradeStop, limit=t2)
+                strategy.exit("X3", from_entry="L", qty=qtyThird, stop=tradeStop, limit=t3)
+            else
+                strategy.exit("X2", from_entry="S", qty=qtyThird, stop=tradeStop, limit=t2)
+                strategy.exit("X3", from_entry="S", qty=qtyThird, stop=tradeStop, limit=t3)
+    if tryGap
+        float minGap = math.max(gapTicks * tick, gapMult * nz(avgRange))
+        [gb, gt] = f_findGap(side, startBar, minGap)
+        bool placed = false
+        if not na(gb) and canTrade and inWindow
+            float lim = math.round_to_mintick(limitAt == "Gap top" ? (side == 1 ? gt : gb) : (gb + gt) / 2)
+            float stp = side == 1 ? extreme - tick : extreme + tick
+            float risk = side * (lim - stp)
+            bool priceBeyond = side * (close - lim) > 0          // the limit must still be a pullback
+            if risk > 0 and priceBeyond
+                [x1, x2, x3] = f_targets(side, lim, risk)
+                zoneBot := gb
+                zoneTop := gt
+                limitPx := lim
+                tradeStop := stp
+                t1 := x1
+                t2 := x2
+                t3 := x3
+                orderBar := bar_index
+                beDone := false
+                entries += 1
+                placed := true
+                if side == 1
+                    strategy.entry("L", strategy.long, qty=fullQty, limit=lim)
+                    strategy.exit("X1", from_entry="L", qty=qtyThird, stop=stp, limit=t1)
+                    strategy.exit("X2", from_entry="L", qty=qtyThird, stop=stp, limit=t2)
+                    strategy.exit("X3", from_entry="L", qty=qtyThird, stop=stp, limit=t3)
+                else
+                    strategy.entry("S", strategy.short, qty=fullQty, limit=lim)
+                    strategy.exit("X1", from_entry="S", qty=qtyThird, stop=stp, limit=t1)
+                    strategy.exit("X2", from_entry="S", qty=qtyThird, stop=stp, limit=t2)
+                    strategy.exit("X3", from_entry="S", qty=qtyThird, stop=stp, limit=t3)
+        if placed
+            state := 3
+        else if state == 0 and na(gb)
+            state := 1          // no gap yet: allow one more bar
+        else
+            state := 0
+
+if clock >= flattenAt or not inDates
+    strategy.cancel_all()
+    if strategy.position_size != 0
+        strategy.close_all(comment="Session flatten", immediately=true)
+    if state != 0
+        state := 0
+
+// ---------------------------------------------------------------- plots
+plot(clock >= structFrom and clock < flattenAt ? lastSH : na, "Last swing high", color=color.new(color.red, 60), style=plot.style_circles)
+plot(clock >= structFrom and clock < flattenAt ? lastSL : na, "Last swing low", color=color.new(color.green, 60), style=plot.style_circles)
+plot(state >= 3 ? zoneBot : na, "Gap bottom", color=color.new(color.teal, 40), style=plot.style_linebr)
+plot(state >= 3 ? zoneTop : na, "Gap top", color=color.new(color.teal, 40), style=plot.style_linebr)
+plot(state >= 3 ? limitPx : na, "Limit", color=color.new(color.blue, 30), style=plot.style_linebr)
+plot(state >= 3 ? tradeStop : na, "Stop", color=color.red, style=plot.style_linebr)
+plot(state == 4 ? t1 : na, "Target 1", color=color.new(color.green, 50), style=plot.style_linebr)
+plot(state == 4 ? t2 : na, "Target 2", color=color.new(color.green, 25), style=plot.style_linebr)
+plot(state == 4 ? t3 : na, "Target 3", color=color.green, style=plot.style_linebr)
+plotshape(shiftNow and side == 1, title="Shift up", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(shiftNow and side == -1, title="Shift down", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+bgcolor(inWindow ? color.new(color.blue, 94) : na)

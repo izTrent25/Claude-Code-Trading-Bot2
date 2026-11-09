@@ -8,12 +8,16 @@ strategy("PVNT SMC Research v0.1 — paper research", overlay=true,
      calc_on_order_fills=false, margin_long=1, margin_short=1)
 // Standalone research strategy. Not the existing PVNT indicator. No webhook executor.
 // Core signal matches Python; fill, sizing, context alignment and risk models differ.
-// Use standard one-minute candles. Settings > Properties controls actual costs.
+// Use standard 1-, 5- or 15-minute candles (9 Nov 2026: was 1-minute only). The lookback,
+// confirmation and holding settings are counted in BARS, so they scale with the chart: 20 bars is
+// 20 minutes on a 1-minute chart and 5 hours on a 15-minute chart. That matches the Python research
+// runs made with --bars 5 and --bars 15 (research_log rows 24-25, 43-49). Settings > Properties
+// controls actual costs.
 // NOTE: the seven dollar-denominated input lines below were garbled in the PDF this
 // file was rebuilt from and were reconstructed from config.json. Compile in TradingView
 // before relying on this script.
-if barstate.isfirst and (not timeframe.isminutes or timeframe.multiplier != 1)
-    runtime.error("Use a standard 1-minute chart for this research strategy.")
+if barstate.isfirst and (not timeframe.isminutes or (timeframe.multiplier != 1 and timeframe.multiplier != 5 and timeframe.multiplier != 15))
+    runtime.error("Use a standard 1-, 5- or 15-minute chart for this research strategy.")
 
 int n = input.int(20, "Prior-bar liquidity lookback", minval=3)
 int confirmBars = input.int(5, "Maximum bars after sweep", minval=1)
@@ -49,7 +53,7 @@ int clock = hour(time, tz) * 100 + minute(time, tz)
 int closeClock = hour(time_close, tz) * 100 + minute(time_close, tz)
 int dayKey = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
 bool newDay = ta.change(dayKey) != 0
-bool gap = not na(time[1]) and time - time[1] > 60000
+bool gap = not na(time[1]) and time - time[1] > timeframe.in_seconds() * 1000   // a gap is anything longer than one chart bar
 bool inDates = time >= startDate and time_close <= endDate
 bool entrySession = clock >= entryStart and closeClock < entryEnd
 
