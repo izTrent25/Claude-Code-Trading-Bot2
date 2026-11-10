@@ -198,10 +198,11 @@ class Engine:
             p=self.position
             if p:
                 be_r=float(self.c.get('breakeven_r',0) or 0); trail_n=int(self.c.get('trail_bars',0) or 0)
-                if be_r or trail_n:
+                be_at=p.get('breakeven_at')  # research option: the proposal names the price that moves the stop to the entry
+                if be_r or trail_n or be_at is not None:
                     p['mfe']=max(p['mfe'],side*((b.high if side==1 else b.low)-p['entry']))
-                    armed=p['mfe']>=be_r*p['dist0'] if be_r else True
-                    if armed and be_r and not p['be']:
+                    armed=p['mfe']>=side*(be_at-p['entry']) if be_at is not None else (p['mfe']>=be_r*p['dist0'] if be_r else True)
+                    if armed and (be_r or be_at is not None) and not p['be']:
                         p['be']=True; p['stop']=max(p['stop'],p['entry']) if side==1 else min(p['stop'],p['entry'])
                     if armed and trail_n and len(self.recent)>=trail_n:
                         ref=min(x.low for x in list(self.recent)[-trail_n:]) if side==1 else max(x.high for x in list(self.recent)[-trail_n:])

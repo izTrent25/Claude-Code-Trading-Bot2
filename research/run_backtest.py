@@ -29,6 +29,7 @@ from overnight_drift import OvernightDriftStrategy  # noqa: E402
 from turn_of_month import TurnOfMonthStrategy  # noqa: E402
 from noise_momentum import NoiseMomentumStrategy  # noqa: E402
 from orb_candle import OrbCandleStrategy  # noqa: E402
+from avwap_pullback import AvwapPullbackStrategy  # noqa: E402
 
 # Settings the VWAP/ORB/FVG spec asks for (research/SPEC_vwap_orb_fvg.md); --set still overrides.
 VOF_DEFAULTS = {'risk_per_trade': 20, 'reward_risk': 1.5, 'max_hold_bars': 60, 'entry_start': '08:45'}
@@ -52,6 +53,11 @@ OD_DEFAULTS = {**FIXED1, 'hold_overnight': True, 'intrabar_stop': False}
 TM_DEFAULTS = {**FIXED1, 'hold_overnight': True, 'intrabar_stop': False}
 NM_DEFAULTS = {**FIXED1, 'entry_start': '08:30', 'entry_end': '14:31', 'flatten_time': '14:55', 'intrabar_stop': False}
 OC_DEFAULTS = {**FIXED1, 'entry_start': '08:30', 'entry_end': '08:40', 'flatten_time': '14:55', 'intrabar_stop': True}
+# Anchored-VWAP pullback (research/SPEC_avwap_pullback.md): one contract per leg, the indicator's 60-bar expiry as the time stop,
+# stops fill between bars. Version A (avwap) trades at any hour and holds through sessions; version B (avwap_day) keeps session rules.
+AV_DEFAULTS = {'risk_per_trade': 1e9, 'max_contracts': 1, 'daily_loss': 1e9, 'max_hold_bars': 60, 'max_trades_per_day': 50,
+               'hold_overnight': True, 'intrabar_stop': True}
+AV_DAY_DEFAULTS = {**AV_DEFAULTS, 'hold_overnight': False, 'entry_start': '08:30', 'entry_end': '14:31', 'flatten_time': '14:55', 'av_session': True}
 
 # --- speed patch: cache each bar's parsed datetime (the engine parses it ~6 times per bar).
 _orig_dt = Bar.dt
@@ -110,7 +116,7 @@ def random_direction(base):
             s = super().on_bar(b)
             if s and self.rng.random() < 0.5:
                 s = {**s, 'side': -s['side'], 'stop': b.close + (b.close - s['stop']), 'reason': 'random-direction control'}
-                for k in ('target', 'limit'):
+                for k in ('target', 'limit', 'breakeven_at'):
                     if s.get(k) is not None: s[k] = b.close + (b.close - s[k])
             return s
     return RandomDirection
@@ -131,6 +137,10 @@ REGISTRY = {
     'noise_momentum_randdir': (lambda c, seed: random_direction(NoiseMomentumStrategy)(c, seed), NM_DEFAULTS, True),
     'orb_candle': (lambda c, seed: OrbCandleStrategy(c), OC_DEFAULTS, False),
     'orb_candle_randdir': (lambda c, seed: random_direction(OrbCandleStrategy)(c, seed), OC_DEFAULTS, True),
+    'avwap': (lambda c, seed: AvwapPullbackStrategy(c), AV_DEFAULTS, False),
+    'avwap_randdir': (lambda c, seed: random_direction(AvwapPullbackStrategy)(c, seed), AV_DEFAULTS, True),
+    'avwap_day': (lambda c, seed: AvwapPullbackStrategy(c), AV_DAY_DEFAULTS, False),
+    'avwap_day_randdir': (lambda c, seed: random_direction(AvwapPullbackStrategy)(c, seed), AV_DAY_DEFAULTS, True),
 }
 
 

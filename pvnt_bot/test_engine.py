@@ -159,6 +159,12 @@ class ResearchOptionTests(unittest.TestCase):
         e.process(b('15:01'));entry=e.position['entry']                               # entry 100.5, risk 5.5, target 111.5
         e.process(b('15:02',100,108,100,107));self.assertEqual(e.position['stop'],entry)   # +1R seen (not 2R): stop now at entry
         e.process(b('15:03',107,108,100.4,105));self.assertIsNone(e.position);self.assertEqual(e.trades[-1]['reason'],'stop')
+    def test_breakeven_at_a_price_named_by_the_proposal(self):
+        e=self.make();e.process(b('15:00'));e.pending={'side':1,'stop':95,'target':120,'breakeven_at':108,'signal_time':e.last.timestamp}
+        e.process(b('15:01'));entry=e.position['entry']                               # entry 100.5
+        e.process(b('15:02',100,107.75,100,107));self.assertEqual(e.position['stop'],95)   # 108 not reached: stop stays
+        e.process(b('15:03',107,108,106,107));self.assertEqual(e.position['stop'],entry)   # reached: stop to entry, from the next bar
+        e.process(b('15:04',107,108,100.4,105));self.assertIsNone(e.position);self.assertEqual(e.trades[-1]['reason'],'stop')
     def test_trailing_stop_tightens_behind_last_bars(self):
         e=self.make(use_target=False,trail_bars=2);e.process(b('15:00'));e.pending={'side':1,'stop':95,'signal_time':e.last.timestamp}
         e.process(b('15:01',100,101,99,100));e.process(b('15:02',100,106,100,105));e.process(b('15:03',105,109,104,108))

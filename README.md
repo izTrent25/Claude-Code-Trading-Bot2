@@ -4,11 +4,15 @@ A workbench for building and honestly testing day-trading rules on Nasdaq-100 fu
 (NQ / MNQ), with the goal of a bot that sends notifications or trades automatically once a
 rule has proven itself. Backtests run on 16 years of one-minute data in `data/futures/`.
 
-Last updated 8 November 2026. Where things stand, in one line: two strategies and the
-TJR method have been tested honestly on 2010–2020 and none beats costs yet; the
-opening-range breakout is next. Details in [CONTINUE_HERE.md](CONTINUE_HERE.md).
+Last updated 9 November 2026. Where things stand, in one line: a dozen rules (the sweep
+rule, VWAP/ORB/FVG, the opening-range breakout, SuperTrend, six evidence-backed candidates,
+TJR, the Anchored-VWAP pullback) have been tested honestly on 2010–2020; only the turn of the
+month passes the pass mark, and it holds overnight, which a prop account cannot; the next idea
+is up. Details in [CONTINUE_HERE.md](CONTINUE_HERE.md).
 
-Three pages drive the work:
+Three pages drive the work, and [ROADMAP.md](ROADMAP.md) holds the whole plan: Phase 1 is
+a strategy that passes an honest backtest, Phase 2 adds agents from trader-skill that
+check every trade and never act without your yes.
 
 ## 1. I have a new idea
 

@@ -1,0 +1,484 @@
+//@version=6
+strategy("AVWAP Pullback Research v1 — paper research", overlay=true,
+     initial_capital=50000, currency=currency.USD, pyramiding=0,
+     default_qty_type=strategy.fixed, default_qty_value=3,
+     commission_type=strategy.commission.cash_per_contract, commission_value=0.75,
+     slippage=2, backtest_fill_limits_assumption=1,
+     process_orders_on_close=false, calc_on_every_tick=false, calc_on_order_fills=false,
+     margin_long=1, margin_short=1, max_bars_back=500)
+// PhenLabs' indicator "Anchored VWAP Pullback & Target Zones [PhenLabs]" (MPL 2.0, kept unchanged at
+// pvnt_bot/AVPT_PhenLabs_indicator.pine) rewritten as a STRATEGY so the Strategy Tester can price it.
+// Rules and every deliberate difference: research/SPEC_avwap_pullback.md. Python twin: pvnt_bot/avwap_pullback.py.
+// What is the same: the seven profile engines, the shared swing anchors and their anchored VWAP bands, the
+// pullback zones, the reclaim rule and its filters, the stop and target maths, the 60-bar expiry, the flip.
+// What changed to make it tradeable:
+//   - orders: three contracts at the next bar's open after a signal (the indicator "enters" at the signal
+//     bar's close, which nobody can do); one exit per target; stop to the entry once the first third fills;
+//   - a target counts when price trades ONE TICK through it (the tester's own fill rule, set above); the
+//     indicator counted a touch; the plan levels are rounded to the tick like order prices;
+//   - swing pivots need the centre bar strictly beyond all bars either side (an explicit loop, the same rule
+//     the Python uses; what ta.pivothigh does with equal highs is undocumented);
+//   - no "Auto-Optimize": that picks the profile with the best PAST win rate on the very bars it then scores,
+//     and its win rate counts a trade that reached TP1 and stopped at the entry as a win. Pick a profile here.
+//   - costs: $0.75 per contract per side and 2 ticks of slippage, set above (the tester defaults to zero);
+//   - optional day session (signals 08:30-14:30 Chicago, flat 14:55); as published it trades round the clock.
+// Not tick-for-tick parity with the engine: the flip closes here at the next open (the engine at the signal
+// close), TradingView's intrabar fill order on a bar that touches a stop and a target, its drawdown maths.
+
+// ---------------------------------------------------------------- inputs
+enum Profile
+    BALANCED     = "Balanced (1.0σ · 26% Eff)"
+    CONSERVATIVE = "Conservative (0.8σ · 35% Eff)"
+    AGGRESSIVE   = "Aggressive (1.25σ · 18% Eff)"
+    SHALLOW      = "Shallow Pullback (0.65σ · 30% Eff)"
+    DEEP_VALUE   = "Deep Value Reclaim (1.45σ · 22% Eff)"
+    VOL_CLIMAX   = "Volume Climax Reclaim (1.0σ · 1.25x Vol)"
+    CUSTOM       = "Custom Thresholds"
+
+enum TargetMode
+    HYBRID      = "R Ladder + Impulse High/Low Magnet"
+    R_MULTIPLES = "Fixed R Ladder (1R / 2R / 3R)"
+
+Profile    profileIn      = input.enum(Profile.BALANCED, "Profile (one at a time, no Auto-Optimize)")
+int        swingLen       = input.int(10, "Structural anchor swing lookback", minval=3, maxval=40)
+int        maxPbPerAnchor = input.int(2, "Max pullbacks per trend anchor", minval=1, maxval=4)
+float      minImpulseAtr  = input.float(1.40, "Min impulse expansion (ATR)", minval=0.60, maxval=3.50, step=0.10)
+float      customMinEr    = input.float(26.0, "Custom: min trend efficiency (%)", minval=10.0, maxval=70.0, step=2.0)
+float      customBandSig  = input.float(1.00, "Custom: value band width (sigma)", minval=0.40, maxval=2.20, step=0.05)
+TargetMode targetMode     = input.enum(TargetMode.HYBRID, "Target projection mode")
+float      slBufferAtr    = input.float(0.20, "Stop buffer beyond the pullback (ATR)", minval=0.05, maxval=1.00, step=0.05)
+bool       useBeRatchet   = input.bool(true, "Move stop to the entry after TP1")
+int        expireBars     = input.int(60, "Plan expiry (bars)", minval=1)
+int        qtyThird       = input.int(1, "Contracts per target", minval=1)
+bool       daySession     = input.bool(false, "Day session only (signals in the window, flat at the flatten time)")
+string     tz             = input.string("America/Chicago", "Session timezone")
+int        winStart       = input.int(830, "Window start HHMM", minval=0, maxval=2359)
+int        winEnd         = input.int(1430, "Window end HHMM", minval=0, maxval=2359)
+int        flattenAt      = input.int(1455, "Flatten HHMM", minval=0, maxval=2359)
+bool       showDash       = input.bool(true, "Show the indicator-style scorecard next to the tester")
+int        startDate      = input.time(timestamp("01 Jan 2010 00:00 +0000"), "Test begins")
+int        endDate        = input.time(timestamp("31 Dec 2030 23:59 +0000"), "Test ends")
+
+int selIdx = switch profileIn
+    Profile.BALANCED     => 0
+    Profile.CONSERVATIVE => 1
+    Profile.AGGRESSIVE   => 2
+    Profile.SHALLOW      => 3
+    Profile.DEEP_VALUE   => 4
+    Profile.VOL_CLIMAX   => 5
+    => 6
+int   fullQty = 3 * qtyThird
+float tick    = syminfo.mintick
+bool  inDates = time >= startDate and time_close <= endDate
+int   clock   = hour(time, tz) * 100 + minute(time, tz)
+bool  inWindow   = not daySession or (clock >= winStart and clock < winEnd)
+bool  flattenNow = daySession and clock >= flattenAt
+
+// ---------------------------------------------------------------- types
+type Plan
+    int   dir
+    int   entryBar
+    float entry
+    float initSl
+    float activeSl
+    float risk
+    float tp1
+    float tp2
+    float tp3
+    bool  tp1Hit
+    bool  tp2Hit
+    bool  tp3Hit
+    int   status      // 0 open, 1 TP3, 2 ended after TP1, -1 stop, 3 expired or flipped
+    bool  isMag
+
+type Eng
+    float bandSigma
+    float outerSigma
+    float minErPct
+    float minQual
+    float slScale
+    float minRiskAtr
+    float minRelAct
+    bool  bullInZone
+    float bullPbLow
+    int   bullPbUsed
+    bool  bearInZone
+    float bearPbHigh
+    int   bearPbUsed
+    Plan  plan
+    // the indicator's own scorecard, kept so you can see how it differs from the tester
+    int   plans
+    int   tp1Wins
+    int   stops
+
+// ---------------------------------------------------------------- section 3 of the indicator: metrics
+f_clamp(float v, float lo, float hi) => math.min(math.max(v, lo), hi)
+
+float rawAtr      = ta.atr(14)
+float safeAtr     = nz(rawAtr, math.max(high - low, tick * 10.0))
+float barSpan     = math.max(high - low, tick)
+float volSma      = ta.sma(volume, 20)
+bool  hasRealVol  = not na(volume) and volume > 0 and not na(volSma) and volSma > 0
+float relActivity = hasRealVol ? (volume / volSma) : (barSpan / math.max(safeAtr, tick))
+float actNorm     = f_clamp(relActivity / 2.0, 0.0, 1.0)
+float barWeight   = hasRealVol ? math.max(nz(volume), 1e-6) : math.max(relActivity, 0.1)
+int   erLen       = 10
+float netMove     = math.abs(close - nz(close[erLen], close))
+float pathMove    = nz(ta.sma(math.abs(close - nz(close[1], close)), erLen), 0.0) * float(erLen)
+float erPct       = pathMove > 0 ? f_clamp((netMove / pathMove) * 100.0, 0.0, 100.0) : 0.0
+float erNorm      = f_clamp(erPct / 55.0, 0.0, 1.0)
+float bullQual    = math.round(f_clamp((0.40 * f_clamp((close - low) / barSpan, 0.0, 1.0) + 0.35 * erNorm + 0.25 * actNorm) * 100.0 * (close > open ? 1.0 : 0.85), 0.0, 100.0), 1)
+float bearQual    = math.round(f_clamp((0.40 * f_clamp((high - close) / barSpan, 0.0, 1.0) + 0.35 * erNorm + 0.25 * actNorm) * 100.0 * (close < open ? 1.0 : 0.85), 0.0, 100.0), 1)
+float prevHigh    = nz(high[1], high)
+float prevLow     = nz(low[1], low)
+float fiveBarMove = (close - nz(close[5], close)) / math.max(safeAtr, tick)
+bool  bearCrash   = fiveBarMove < -3.6 and close < open
+bool  bullCrash   = fiveBarMove >  3.6 and close > open
+
+// the bar `n` back is a swing low (s = 1) or swing high (s = -1) when strictly beyond the n bars either side
+f_pivot(int n, int s) =>
+    float v = s == 1 ? low[n] : high[n]
+    bool ok = bar_index >= 2 * n
+    if ok
+        for i = 0 to 2 * n
+            if i != n
+                float x = s == 1 ? low[i] : high[i]
+                if s * (v - x) >= 0
+                    ok := false
+                    break
+    ok ? v : na
+float pl = f_pivot(swingLen, 1)
+float ph = f_pivot(swingLen, -1)
+
+// ---------------------------------------------------------------- shared anchors and the seven engines
+var array<Eng> engines = array.new<Eng>()
+if barstate.isfirst
+    array.push(engines, Eng.new(1.00, 2.00, 26.0, 52.0, 1.00, 0.35, 0.00, false, na, 0, false, na, 0, na, 0, 0, 0))
+    array.push(engines, Eng.new(0.80, 1.75, 35.0, 60.0, 1.15, 0.35, 0.00, false, na, 0, false, na, 0, na, 0, 0, 0))
+    array.push(engines, Eng.new(1.25, 2.30, 18.0, 44.0, 0.85, 0.30, 0.00, false, na, 0, false, na, 0, na, 0, 0, 0))
+    array.push(engines, Eng.new(0.65, 1.60, 30.0, 55.0, 0.90, 0.30, 0.00, false, na, 0, false, na, 0, na, 0, 0, 0))
+    array.push(engines, Eng.new(1.45, 2.50, 22.0, 48.0, 1.25, 0.40, 0.00, false, na, 0, false, na, 0, na, 0, 0, 0))
+    array.push(engines, Eng.new(1.00, 2.00, 24.0, 58.0, 0.95, 0.32, 1.25, false, na, 0, false, na, 0, na, 0, 0, 0))
+    array.push(engines, Eng.new(customBandSig, customBandSig + 1.0, customMinEr, 50.0, 1.00, 0.35, 0.00, false, na, 0, false, na, 0, na, 0, 0, 0))
+if array.size(engines) == 7
+    Eng custEng = array.get(engines, 6)
+    custEng.bandSigma  := customBandSig
+    custEng.outerSigma := customBandSig + 1.0
+    custEng.minErPct   := customMinEr
+
+var bool  bullActive = false
+var float bullPrice  = na
+var float bullSumWP  = 0.0
+var float bullSumWP2 = 0.0
+var float bullSumW   = 0.0
+var float bullAvwap  = na
+var float bullStd    = 0.0
+var float bullImp    = na
+var bool  bullArmed  = false
+var int   bullBar    = 0
+var bool  bearActive = false
+var float bearPrice  = na
+var float bearSumWP  = 0.0
+var float bearSumWP2 = 0.0
+var float bearSumW   = 0.0
+var float bearAvwap  = na
+var float bearStd    = 0.0
+var float bearImp    = na
+var bool  bearArmed  = false
+var int   bearBar    = 0
+var int   bias       = 0
+
+// order-side state for the chosen profile
+var bool  beDone    = false
+var int   tradeDir  = 0
+var float tradeSl   = na
+var float tradeT1   = na
+var float tradeT2   = na
+var float tradeT3   = na
+bool  sigLong  = false
+bool  sigShort = false
+
+f_endPlan(Eng e, int status) =>
+    e.plan.status := status
+    e.plans += 1
+    if e.plan.tp1Hit
+        e.tp1Wins += 1
+    if status == -1
+        e.stops += 1
+
+if barstate.isconfirmed and array.size(engines) == 7
+    // ---- step A: resolve the open plans (targets one tick through, the stop on a touch)
+    for i = 0 to 6
+        Eng e = array.get(engines, i)
+        Plan p = e.plan
+        if not na(p) and p.status == 0
+            if flattenNow
+                f_endPlan(e, 3)
+            else if bar_index > p.entryBar
+                int s = p.dir
+                float ext = s == 1 ? high : low
+                bool hitStop = s == 1 ? low <= p.activeSl : high >= p.activeSl
+                if hitStop
+                    f_endPlan(e, p.tp1Hit ? 2 : -1)
+                else
+                    if not p.tp1Hit and s * (ext - p.tp1) >= tick
+                        p.tp1Hit := true
+                        if useBeRatchet
+                            p.activeSl := p.entry
+                    if not p.tp2Hit and s * (ext - p.tp2) >= tick
+                        p.tp2Hit := true
+                    if not p.tp3Hit and s * (ext - p.tp3) >= tick
+                        p.tp3Hit := true
+                        f_endPlan(e, 1)
+                    else if bar_index - p.entryBar >= expireBars
+                        f_endPlan(e, p.tp1Hit ? 2 : 3)
+    // ---- step B: carry the anchors forward
+    if bullActive
+        bullSumWP  += barWeight * hlc3
+        bullSumWP2 += barWeight * hlc3 * hlc3
+        bullSumW   += barWeight
+        bullAvwap  := bullSumWP / math.max(bullSumW, 1e-9)
+        bullStd    := math.max(math.sqrt(math.max(0.0, bullSumWP2 / math.max(bullSumW, 1e-9) - bullAvwap * bullAvwap)), safeAtr * 0.25)
+        if na(bullImp) or high >= bullImp
+            bullImp := high
+        if not bullArmed and bullImp - bullPrice >= minImpulseAtr * safeAtr
+            bullArmed := true
+        if close < bullPrice or close < bullAvwap - 2.60 * bullStd
+            bullActive := false
+            bullArmed := false
+            for i = 0 to 6
+                Eng e = array.get(engines, i)
+                e.bullInZone := false
+    if bearActive
+        bearSumWP  += barWeight * hlc3
+        bearSumWP2 += barWeight * hlc3 * hlc3
+        bearSumW   += barWeight
+        bearAvwap  := bearSumWP / math.max(bearSumW, 1e-9)
+        bearStd    := math.max(math.sqrt(math.max(0.0, bearSumWP2 / math.max(bearSumW, 1e-9) - bearAvwap * bearAvwap)), safeAtr * 0.25)
+        if na(bearImp) or low <= bearImp
+            bearImp := low
+        if not bearArmed and bearPrice - bearImp >= minImpulseAtr * safeAtr
+            bearArmed := true
+        if close > bearPrice or close > bearAvwap + 2.60 * bearStd
+            bearActive := false
+            bearArmed := false
+            for i = 0 to 6
+                Eng e = array.get(engines, i)
+                e.bearInZone := false
+    // ---- step C: a confirmed swing seeds a new anchor (exact reconstruction from the pivot bar)
+    Eng balRef = array.get(engines, 0)
+    if not na(pl) and bar_index - swingLen >= 0
+        bool replaceBull = not bullActive or pl < bullPrice or balRef.bullPbUsed >= maxPbPerAnchor or (bullArmed and pl > bullPrice and high - pl >= minImpulseAtr * safeAtr)
+        if replaceBull and close > pl
+            float sWP = 0.0
+            float sWP2 = 0.0
+            float sW = 0.0
+            float mxHi = high
+            for i = 0 to swingLen
+                int k = swingLen - i
+                float spanK = math.max(nz(high[k], high) - nz(low[k], low), tick)
+                float wk = hasRealVol ? math.max(nz(volume[k]), 1e-6) : math.max(spanK / math.max(safeAtr, tick), 0.1)
+                float pk = (nz(high[k], high) + nz(low[k], low) + nz(close[k], close)) / 3.0
+                sWP += wk * pk
+                sWP2 += wk * pk * pk
+                sW += wk
+                if nz(high[k], high) >= mxHi
+                    mxHi := nz(high[k], high)
+            bullActive := true
+            bullPrice := pl
+            bullBar := bar_index - swingLen
+            bullSumWP := sWP
+            bullSumWP2 := sWP2
+            bullSumW := sW
+            bullAvwap := sWP / math.max(sW, 1e-9)
+            bullStd := math.max(math.sqrt(math.max(0.0, sWP2 / math.max(sW, 1e-9) - bullAvwap * bullAvwap)), safeAtr * 0.25)
+            bullImp := mxHi
+            bullArmed := mxHi - pl >= minImpulseAtr * safeAtr
+            for i = 0 to 6
+                Eng e = array.get(engines, i)
+                e.bullInZone := false
+                e.bullPbLow := na
+                e.bullPbUsed := 0
+    if not na(ph) and bar_index - swingLen >= 0
+        bool replaceBear = not bearActive or ph > bearPrice or balRef.bearPbUsed >= maxPbPerAnchor or (bearArmed and ph < bearPrice and ph - low >= minImpulseAtr * safeAtr)
+        if replaceBear and close < ph
+            float sWP = 0.0
+            float sWP2 = 0.0
+            float sW = 0.0
+            float mnLo = low
+            for i = 0 to swingLen
+                int k = swingLen - i
+                float spanK = math.max(nz(high[k], high) - nz(low[k], low), tick)
+                float wk = hasRealVol ? math.max(nz(volume[k]), 1e-6) : math.max(spanK / math.max(safeAtr, tick), 0.1)
+                float pk = (nz(high[k], high) + nz(low[k], low) + nz(close[k], close)) / 3.0
+                sWP += wk * pk
+                sWP2 += wk * pk * pk
+                sW += wk
+                if nz(low[k], low) <= mnLo
+                    mnLo := nz(low[k], low)
+            bearActive := true
+            bearPrice := ph
+            bearBar := bar_index - swingLen
+            bearSumWP := sWP
+            bearSumWP2 := sWP2
+            bearSumW := sW
+            bearAvwap := sWP / math.max(sW, 1e-9)
+            bearStd := math.max(math.sqrt(math.max(0.0, sWP2 / math.max(sW, 1e-9) - bearAvwap * bearAvwap)), safeAtr * 0.25)
+            bearImp := mnLo
+            bearArmed := ph - mnLo >= minImpulseAtr * safeAtr
+            for i = 0 to 6
+                Eng e = array.get(engines, i)
+                e.bearInZone := false
+                e.bearPbHigh := na
+                e.bearPbUsed := 0
+    bias := bullActive and bullArmed and not (bearActive and bearArmed) ? 1 : bearActive and bearArmed and not (bullActive and bullArmed) ? -1 :
+         bullActive and bullArmed and bearActive and bearArmed ? (bullBar >= bearBar ? 1 : -1) : bullActive ? 1 : bearActive ? -1 : 0
+    // ---- step D: pullback zones, reclaims and plans, every profile in parallel
+    for i = 0 to 6
+        Eng e = array.get(engines, i)
+        int openDir = not na(e.plan) and e.plan.status == 0 ? e.plan.dir : -99
+        int take = 0
+        float pbLevel = na
+        if bullActive and bullArmed and e.bullPbUsed < maxPbPerAnchor and not na(bullAvwap)
+            float upper = bullAvwap + e.bandSigma * bullStd
+            float lowerDef = bullAvwap - e.outerSigma * bullStd
+            if low <= upper and close >= lowerDef and close > bullPrice and high < bullImp
+                if not e.bullInZone
+                    e.bullInZone := true
+                    e.bullPbLow := low
+                else if low < nz(e.bullPbLow, low)
+                    e.bullPbLow := low
+            else if close < lowerDef
+                e.bullInZone := false
+            bool reclaim = e.bullInZone and close > bullAvwap and close > open and close >= prevHigh - 0.20 * safeAtr
+            if reclaim and openDir != 1 and inWindow and inDates
+                pbLevel := nz(e.bullPbLow, low)
+                float depth = (bullImp - pbLevel) / math.max(bullImp - bullPrice, safeAtr * 0.5)
+                if erPct >= e.minErPct and bullQual >= e.minQual and relActivity >= e.minRelAct and depth >= 0.12 and depth <= 0.85 and not bearCrash
+                    take := 1
+                else
+                    e.bullInZone := false
+        if take == 0 and bearActive and bearArmed and e.bearPbUsed < maxPbPerAnchor and not na(bearAvwap)
+            float lower = bearAvwap - e.bandSigma * bearStd
+            float upperDef = bearAvwap + e.outerSigma * bearStd
+            if high >= lower and close <= upperDef and close < bearPrice and low > bearImp
+                if not e.bearInZone
+                    e.bearInZone := true
+                    e.bearPbHigh := high
+                else if high > nz(e.bearPbHigh, high)
+                    e.bearPbHigh := high
+            else if close > upperDef
+                e.bearInZone := false
+            bool reclaim = e.bearInZone and close < bearAvwap and close < open and close <= prevLow + 0.20 * safeAtr
+            if reclaim and openDir != -1 and inWindow and inDates
+                pbLevel := nz(e.bearPbHigh, high)
+                float depth = (pbLevel - bearImp) / math.max(bearPrice - bearImp, safeAtr * 0.5)
+                if erPct >= e.minErPct and bearQual >= e.minQual and relActivity >= e.minRelAct and depth >= 0.12 and depth <= 0.85 and not bullCrash
+                    take := -1
+                else
+                    e.bearInZone := false
+        if take != 0
+            if openDir != -99
+                f_endPlan(e, e.plan.tp1Hit ? 2 : 3)          // a plan still open is the other way: the indicator flips it
+            int s = take
+            float avwapS = s == 1 ? bullAvwap : bearAvwap
+            float stdS = s == 1 ? bullStd : bearStd
+            float impS = s == 1 ? bullImp : bearImp
+            float bandEdge = avwapS - s * e.bandSigma * stdS
+            float rawSl = (s == 1 ? math.min(pbLevel, bandEdge) : math.max(pbLevel, bandEdge)) - s * slBufferAtr * e.slScale * safeAtr
+            float risk = f_clamp(math.abs(close - rawSl), safeAtr * e.minRiskAtr, safeAtr * 3.0)
+            float t1 = close + s * risk
+            float t2 = close + s * 2.0 * risk
+            float t3 = close + s * 3.0 * risk
+            bool isMag = false
+            if targetMode == TargetMode.HYBRID
+                float distR = s * (impS - close) / risk
+                if distR >= 1.3 and distR <= 2.4
+                    t2 := impS
+                    isMag := true
+                else if distR > 2.4 and distR <= 4.5
+                    t3 := impS
+                    isMag := true
+            float sl = math.round_to_mintick(close - s * risk)
+            e.plan := Plan.new(s, bar_index, close, sl, sl, risk, math.round_to_mintick(t1), math.round_to_mintick(t2), math.round_to_mintick(t3), false, false, false, 0, isMag)
+            if s == 1
+                e.bullInZone := false
+                e.bullPbUsed += 1
+            else
+                e.bearInZone := false
+                e.bearPbUsed += 1
+            // ---- orders, for the chosen profile only
+            if i == selIdx and (strategy.position_size == 0 or math.sign(strategy.position_size) != s)
+                if strategy.position_size != 0
+                    strategy.close_all(comment="Flip", immediately=true)
+                strategy.cancel_all()
+                tradeDir := s
+                tradeSl := sl
+                tradeT1 := e.plan.tp1
+                tradeT2 := e.plan.tp2
+                tradeT3 := e.plan.tp3
+                beDone := false
+                sigLong := s == 1
+                sigShort := s == -1
+                if s == 1
+                    strategy.entry("L", strategy.long, qty=fullQty)
+                    strategy.exit("X1", from_entry="L", qty=qtyThird, stop=sl, limit=tradeT1)
+                    strategy.exit("X2", from_entry="L", qty=qtyThird, stop=sl, limit=tradeT2)
+                    strategy.exit("X3", from_entry="L", qty=qtyThird, stop=sl, limit=tradeT3)
+                else
+                    strategy.entry("S", strategy.short, qty=fullQty)
+                    strategy.exit("X1", from_entry="S", qty=qtyThird, stop=sl, limit=tradeT1)
+                    strategy.exit("X2", from_entry="S", qty=qtyThird, stop=sl, limit=tradeT2)
+                    strategy.exit("X3", from_entry="S", qty=qtyThird, stop=sl, limit=tradeT3)
+    // ---- trade management for the chosen profile: break-even after the first third, the expiry, the flatten
+    Eng sel = array.get(engines, selIdx)
+    if strategy.position_size != 0
+        bool planGone = na(sel.plan) or sel.plan.status != 0
+        bool expired = not na(sel.plan) and bar_index - sel.plan.entryBar >= expireBars
+        if flattenNow or not inDates
+            strategy.cancel_all()
+            strategy.close_all(comment="Session flatten", immediately=true)
+        else if expired and planGone and not sigLong and not sigShort
+            strategy.cancel_all()
+            strategy.close_all(comment="Expired", immediately=true)
+        else if not beDone and useBeRatchet and math.abs(strategy.position_size) < fullQty
+            // the first third is out: the rest rides with the stop at the entry, from this bar on
+            beDone := true
+            float be = strategy.position_avg_price
+            string id = strategy.position_size > 0 ? "L" : "S"
+            strategy.exit("X2", from_entry=id, qty=qtyThird, stop=be, limit=tradeT2)
+            strategy.exit("X3", from_entry=id, qty=qtyThird, stop=be, limit=tradeT3)
+    else
+        tradeDir := 0
+
+// ---------------------------------------------------------------- plots and the scorecard
+Eng selE = array.size(engines) == 7 ? array.get(engines, selIdx) : na
+float liveAvwap = bias == 1 ? bullAvwap : bias == -1 ? bearAvwap : na
+float liveStd   = bias == 1 ? bullStd : bias == -1 ? bearStd : na
+float bandW     = na(selE) ? 1.0 : selE.bandSigma
+int   liveBar   = bias == 1 ? bullBar : bias == -1 ? bearBar : -1
+bool  switched  = bias != nz(bias[1], 0) or liveBar != nz(liveBar[1], -1)
+color bandCol   = bias == 1 ? color.new(color.teal, 0) : bias == -1 ? color.new(color.red, 0) : color.new(color.white, 100)
+pMean = plot(switched ? na : liveAvwap, "Anchored VWAP", color=bandCol, linewidth=2, style=plot.style_linebr)
+pTop  = plot(switched ? na : liveAvwap + bandW * liveStd, "Band upper", color=color.new(bandCol, 70), style=plot.style_linebr)
+pBot  = plot(switched ? na : liveAvwap - bandW * liveStd, "Band lower", color=color.new(bandCol, 70), style=plot.style_linebr)
+fill(pTop, pBot, color=color.new(bandCol, 92), title="Pullback value band")
+plot(strategy.position_size != 0 ? tradeSl : na, "Stop", color=color.red, style=plot.style_linebr)
+plot(strategy.position_size != 0 ? tradeT1 : na, "Target 1", color=color.new(color.green, 50), style=plot.style_linebr)
+plot(strategy.position_size != 0 ? tradeT2 : na, "Target 2", color=color.new(color.green, 25), style=plot.style_linebr)
+plot(strategy.position_size != 0 ? tradeT3 : na, "Target 3", color=color.green, style=plot.style_linebr)
+plotshape(sigLong, title="Long signal", style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.tiny)
+plotshape(sigShort, title="Short signal", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny)
+bgcolor(daySession and inWindow ? color.new(color.blue, 94) : na)
+
+var table dash = table.new(position.top_right, 2, 4, border_width=1)
+if barstate.islast and showDash and not na(selE)
+    float wr = selE.plans > 0 ? 100.0 * selE.tp1Wins / selE.plans : na
+    table.cell(dash, 0, 0, "AVWAP pullback (strategy)", text_color=color.white, bgcolor=color.new(color.gray, 20), text_size=size.small)
+    table.cell(dash, 1, 0, str.tostring(profileIn), text_color=color.white, bgcolor=color.new(color.gray, 20), text_size=size.small)
+    table.cell(dash, 0, 1, "Plans (indicator's count)", text_color=color.white, bgcolor=color.new(color.gray, 40), text_size=size.small)
+    table.cell(dash, 1, 1, str.tostring(selE.plans) + " · stopped " + str.tostring(selE.stops), text_color=color.white, bgcolor=color.new(color.gray, 40), text_size=size.small)
+    table.cell(dash, 0, 2, "Indicator's 'TP1+ win rate'", text_color=color.white, bgcolor=color.new(color.gray, 40), text_size=size.small)
+    table.cell(dash, 1, 2, na(wr) ? "–" : str.tostring(wr, "#.#") + "% (TP1 reached, even if it then stopped at the entry)", text_color=color.white, bgcolor=color.new(color.gray, 40), text_size=size.small)
+    table.cell(dash, 0, 3, "Money", text_color=color.white, bgcolor=color.new(color.gray, 40), text_size=size.small)
+    table.cell(dash, 1, 3, "see the Strategy Tester: " + str.tostring(strategy.closedtrades) + " trades, net " + str.tostring(strategy.netprofit, "#") + " " + currency.USD, text_color=color.white, bgcolor=color.new(color.gray, 40), text_size=size.small)

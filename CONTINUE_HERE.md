@@ -4,7 +4,7 @@ Read this first when picking the project back up. Tell Claude "continue" and it 
 from this page. Keep the "Where things stand" and "Next up" parts current at the end of
 every working session.
 
-## Where things stand (updated 8 November 2026, evening)
+## Where things stand (updated 9 November 2026, evening)
 
 - **Goal:** a bot that sends trade notifications, or trades automatically, and is profitable.
   You have no prop-firm account yet and use TradingView only, so broker connections are on
@@ -82,8 +82,20 @@ every working session.
   holds overnight. Noise-area momentum is the strongest intraday signal (+$11k before costs,
   +$3.6k after, 3 of 11 years). The rest are closed.
 - **Strategy 5, PVNT flow entry:** spec written (`research/SPEC_pvnt_flow.md`), waiting for your yes.
-- **Engine:** 62 tests pass; new research options `hold_overnight`, `intrabar_stop`, `check_exit`
-  hook; the runner has a strategy registry (`REGISTRY` in `research/run_backtest.py`).
+- **Engine:** 71 tests pass; research options `hold_overnight`, `intrabar_stop`, the `check_exit`
+  hook and, since 9 Nov, a `breakeven_at` proposal key (the price that moves the stop to the entry);
+  the runner has a strategy registry (`REGISTRY` in `research/run_backtest.py`).
+- **Strategy 6, the Anchored-VWAP pullback (9 Nov, tracker chat):** you pasted PhenLabs' "Anchored
+  VWAP Pullback & Target Zones" indicator and asked for it as a strategy, backtested. Source kept at
+  `pvnt_bot/AVPT_PhenLabs_indicator.pine`; spec `research/SPEC_avwap_pullback.md`; Python
+  `pvnt_bot/avwap_pullback.py` (three one-contract legs, one per target, summed by
+  `research/avwap_thirds.py`); rows 121–138; report section "Strategy 6". Balanced profile, 5m, as
+  published: 26,183 trades, **−$263,489**, PF 0.69, **0 of 11 years**, identical to its eight coin-toss
+  twins (median −$264,766); zero costs −$4,443 (a coin flip). Every profile, both target modes,
+  break-even on or off, the day session, 1m (−$1.08 million) and 15m lose. The indicator's "TP1+ win
+  rate" counts a trade that reaches TP1 and stops at the entry as a win; its Auto-Optimize picks in
+  hindsight. **Closed.** The Pine strategy version `pvnt_bot/AVWAP_Pullback_Research.pine` compiles
+  clean and is ready to paste (any timeframe), not loaded.
 - **Sweep rule revisited (9 Nov):** you want to go back to PVNT SMC Research v0.1. Its Pine script
   now accepts 1-, 5- and 15-minute charts (gap detection uses the chart's bar length); bar-count
   settings scale with the chart. The Python already ran on 5m/15m through `--bars` (rows 24–25, 43–49).
@@ -102,7 +114,10 @@ every working session.
    a limit entry instead of market. Tuning risk: write the rule before looking at results. Rows
    start at 121.
 4. Cheaper ideas from the TradingView hunt if wanted: UT Bot trailing line, VWAP-band mean
-   reversion. Or paste the next TradingView script (its tester defaults to zero costs).
+   reversion. Or paste the next TradingView script (its tester defaults to zero costs; the last two,
+   SuperTrend and the Anchored-VWAP pullback, were coin flips minus costs once priced honestly).
+   If you want to see the Anchored-VWAP strategy trade the past on your chart, say so and the Pine
+   at `pvnt_bot/AVWAP_Pullback_Research.pine` goes into the editor (it replaces the unsaved script).
 5. Decide whether to keep the $500-budget copy of the sweep script as your one saved TradingView
    script (it is in the editor, unsaved, and on the MNQ1! 1-minute chart) or discard it.
 6. Any idea in `IDEAS.md` you want to move ahead of the queue.
@@ -177,6 +192,17 @@ Backtest the SuperTrend script as published (holds overnight) on 15-minute bars:
 .venv/bin/python research/run_backtest.py --symbol NQ --years 2010-2020 --strategy supertrend --bars 15 --tag st_a_15m
 ```
 
+Backtest the Anchored-VWAP pullback, one leg at a time (`av_leg` tp1, tp2 or tp3; about a minute each),
+then add the three legs into the three-contract strategy:
+
+```bash
+.venv/bin/python research/run_backtest.py --symbol NQ --years 2010-2020 --strategy avwap --bars 5 --set av_leg=tp3 --tag av_bal_5m_tp3
+```
+
+```bash
+.venv/bin/python research/avwap_thirds.py --name av_bal_5m av_bal_5m_tp1 av_bal_5m_tp2 av_bal_5m_tp3
+```
+
 Backtest the VWAP/ORB/FVG rule:
 
 ```bash
@@ -208,7 +234,8 @@ Results land in `research/results/<tag>/` (ignored by git; re-creatable).
 | `pvnt_bot/orb.py`, `pvnt_bot/ORB_Research.pine`, `research/SPEC_orb.md` | Strategy 3, the opening-range breakout alone, closed 8 Nov 2026. Pine version not yet loaded. |
 | `pvnt_bot/supertrend.py`, `research/SPEC_supertrend.md` | Strategy 4, SuperTrend from TradingView, closed 8 Nov 2026. |
 | `pvnt_bot/{gap_fade,last_half_hour,overnight_drift,turn_of_month,noise_momentum,orb_candle}.py`, `research/SPEC_*.md` | The six evidence-backed candidates, tested 9 Nov 2026. |
-| `research/SPEC_pvnt_flow.md` | Strategy 5, PVNT flow entry, spec only, awaiting your yes. |
+| `research/SPEC_pvnt_flow.md`, `pvnt_bot/PVNT_Flow_Research.pine` | Strategy 5, PVNT flow entry: spec and Pine written, Python and backtest awaiting your yes. |
+| `pvnt_bot/avwap_pullback.py`, `pvnt_bot/AVWAP_Pullback_Research.pine`, `pvnt_bot/AVPT_PhenLabs_indicator.pine`, `research/SPEC_avwap_pullback.md`, `research/avwap_thirds.py` | Strategy 6, the Anchored-VWAP pullback from PhenLabs' indicator, closed 9 Nov 2026 (rows 121–138). |
 | `research/run_backtest.py` | Headless backtester over the data store (`--strategy`, `--bars`, `--set`). |
 | `research/vwap_measure.py` | The VWAP-tilt measurement (found no tilt). |
 | `research/research_log.md` | Every variant ever tested, numbered. |
