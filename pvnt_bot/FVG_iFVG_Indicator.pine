@@ -1,0 +1,249 @@
+//@version=6
+// FVG / iFVG rebuild, version 3. Built to the written spec in research/NOTE_fvg_indicator.md.
+// Defaults match the original "FVG/iFVG (Nephew_Sam_)" look: chart-timeframe gaps only, fixed-width boxes,
+// a gap lives until a candle CLOSES through it, inverted gaps and higher timeframes are off (all switchable).
+//
+// A fair value gap (FVG) is three candles where candle 1's wick and candle 3's wick do not overlap:
+//   bullish: low of candle 3 > high of candle 1   -> box from high[1] (bottom) to low[3] (top), support
+//   bearish: high of candle 3 < low of candle 1   -> box from high[3] (bottom) to low[1] (top), resistance
+// The box starts at candle 1 and extends right. A dotted line marks the midpoint (consequent encroachment, CE).
+// States: FRESH -> PARTIAL (a wick entered) -> CE (a wick reached the midpoint) -> FILLED (a wick reached the
+// far edge: delete or dim). INVERTED (a candle BODY closed through the far edge): the gap flips into the
+// opposite kind of level, dashed border, and stays until a body closes back through it.
+// Everything happens on closed candles only, so nothing repaints.
+indicator("FVG / iFVG (rebuild)", "FVG/iFVG", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ───────────────────────── Inputs ─────────────────────────
+gG = "General"
+fillMode   = input.string("Close", "Filled means", options = ["Wick", "Close"], group = gG,
+     tooltip = "Wick: a wick reaching the far edge of the gap fills it. Close: a candle has to close through the far edge.")
+onFilled   = input.string("Delete", "When filled", options = ["Delete", "Dim"], group = gG,
+     tooltip = "Delete removes a filled gap. Dim keeps it on the chart, faded and frozen.")
+showInv    = input.bool(false, "Show inverted gaps (iFVG)", group = gG,
+     tooltip = "A candle body closing through the far edge flips the gap into the opposite kind of level (dashed border). It is removed when a body closes back through it.")
+extendMode = input.string("Fixed", "Box length", options = ["Fixed", "Until removed"], group = gG)
+extendBars = input.int(20, "Fixed length (bars from candle 1)", minval = 1, maxval = 500, group = gG)
+showCE     = input.bool(true, "Midpoint line (CE)", group = gG)
+showLabels = input.bool(true, "Labels", group = gG)
+transp     = input.int(80, "Box transparency", minval = 0, maxval = 100, group = gG)
+dimTransp  = input.int(94, "Dimmed transparency", minval = 0, maxval = 100, group = gG)
+maxBack    = input.int(300, "Max bars back", minval = 20, maxval = 5000, group = gG,
+     tooltip = "Only look for new gaps within this many bars of the last bar. Higher loads slower.")
+maxPerDir  = input.int(30, "Max live gaps per direction", minval = 1, maxval = 150, group = gG)
+
+gF = "Filters (0 = off)"
+minGapAtr = input.float(0.0, "Minimum gap size, x ATR(14)", minval = 0, step = 0.1, group = gF,
+     tooltip = "Skip gaps smaller than this many ATRs. 0.3 to 0.5 removes most micro-gaps in chop.")
+dispAtr   = input.float(0.0, "Middle candle body, x ATR(14)", minval = 0, step = 0.1, group = gF,
+     tooltip = "Require the middle (displacement) candle's body to be at least this many ATRs.")
+dispPct   = input.float(0.0, "Middle candle body, % of its range", minval = 0, maxval = 100, step = 5, group = gF,
+     tooltip = "Require the middle candle's body to be at least this share of its high-to-low range. 60 to 70 enforces a real push.")
+useSess   = input.bool(false, "Session filter", group = gF)
+sessStr   = input.session("0930-1100", "Session (New York time)", group = gF)
+
+gT = "Higher timeframes (only drawn when above the chart's own timeframe)"
+tf1 = input.timeframe("15", "Higher timeframe 1", group = gT)
+s1  = input.bool(false, "Show higher timeframe 1", group = gT)
+tf2 = input.timeframe("60", "Higher timeframe 2", group = gT)
+s2  = input.bool(false, "Show higher timeframe 2", group = gT)
+tf3 = input.timeframe("240", "Higher timeframe 3", group = gT)
+s3  = input.bool(false, "Show higher timeframe 3", group = gT)
+tf4 = input.timeframe("D", "Higher timeframe 4", group = gT)
+s4  = input.bool(false, "Show higher timeframe 4", group = gT)
+
+gC = "Colors"
+bullCol  = input.color(#26a69a, "Bullish gap", group = gC)
+bearCol  = input.color(#ef5350, "Bearish gap", group = gC)
+iBullCol = input.color(#2962ff, "Inverted, now support", group = gC)
+iBearCol = input.color(#ff9800, "Inverted, now resistance", group = gC)
+ceCol    = input.color(#9598a1, "Midpoint line", group = gC)
+
+// ───────────────────────── Types and helpers ─────────────────────────
+type Zone
+    box    bx
+    line   ce
+    label  lb
+    float  top
+    float  bot
+    int    dir        // +1 = support (bullish), -1 = resistance (bearish)
+    string state      // FRESH, PARTIAL, CE, FILLED
+    bool   inverted
+    string tfName
+
+var zones = array.new<Zone>()
+barMs = timeframe.in_seconds(timeframe.period) * 1000
+
+tfLabel(string tf) =>
+    sec = timeframe.in_seconds(tf)
+    sec >= 604800 ? "W" : sec >= 86400 ? "D" : sec >= 3600 ? str.tostring(sec / 3600) + "h" : str.tostring(sec / 60) + "m"
+
+zoneColor(int dir, bool inverted) =>
+    inverted ? (dir == 1 ? iBullCol : iBearCol) : (dir == 1 ? bullCol : bearCol)
+
+zoneText(string tfn, bool inverted) =>
+    (tfn == "" ? "" : tfn + " ") + (inverted ? "iFVG" : "FVG")
+
+// Filters shared by chart and higher-timeframe gaps.
+passes(float top, float bot, float body2, float range2, float atrv) =>
+    gapOk  = minGapAtr == 0 or (top - bot) >= minGapAtr * atrv
+    dispOk = (dispAtr == 0 or body2 >= dispAtr * atrv) and (dispPct == 0 or body2 >= dispPct / 100 * range2)
+    sessOk = not useSess or not na(time(timeframe.period, sessStr, "America/New_York"))
+    gapOk and dispOk and sessOk
+
+newZone(float top, float bot, int dir, string tfn, int leftT) =>
+    col    = zoneColor(dir, false)
+    rightT = extendMode == "Fixed" ? leftT + extendBars * barMs : time
+    mid    = (top + bot) / 2
+    bx = box.new(leftT, top, rightT, bot, xloc = xloc.bar_time, border_color = color.new(col, 0), border_width = 1,
+         border_style = line.style_solid, bgcolor = color.new(col, transp))
+    line ce = na
+    if showCE
+        ce := line.new(leftT, mid, rightT, mid, xloc = xloc.bar_time, color = color.new(ceCol, 30), style = line.style_dotted)
+    label lb = na
+    if showLabels
+        lb := label.new(rightT, mid, zoneText(tfn, false), xloc = xloc.bar_time, style = label.style_label_left,
+             color = color.new(color.black, 100), textcolor = color.new(col, 0), size = size.small)
+    array.push(zones, Zone.new(bx, ce, lb, top, bot, dir, "FRESH", false, tfn))
+
+kill(Zone z) =>
+    box.delete(z.bx)
+    line.delete(z.ce)
+    label.delete(z.lb)
+
+invert(Zone z) =>
+    z.inverted := true
+    z.dir      := -z.dir
+    z.state    := "FRESH"
+    col = zoneColor(z.dir, true)
+    box.set_border_color(z.bx, color.new(col, 0))
+    box.set_border_style(z.bx, line.style_dashed)
+    box.set_bgcolor(z.bx, color.new(col, transp))
+    if not na(z.lb)
+        label.set_text(z.lb, zoneText(z.tfName, true))
+        label.set_textcolor(z.lb, color.new(col, 0))
+
+dim(Zone z) =>
+    z.state := "FILLED"
+    col = zoneColor(z.dir, z.inverted)
+    box.set_border_color(z.bx, color.new(col, 60))
+    box.set_bgcolor(z.bx, color.new(col, dimTransp))
+    if not na(z.ce)
+        line.set_color(z.ce, color.new(ceCol, 80))
+    if not na(z.lb)
+        label.set_textcolor(z.lb, color.new(col, 60))
+
+// Higher-timeframe gap check, non-repainting: values of the last COMPLETED higher-timeframe bar.
+// Returns: isBull, isBear, bullTop, bullBot, bearTop, bearBot, time of candle 3, time of candle 1,
+//          middle candle body, middle candle range, ATR(14).
+htf(string tf) =>
+    request.security(syminfo.tickerid, tf, [low[1] > high[3], high[1] < low[3], low[1], high[3], low[3], high[1], time[1], time[3],
+         math.abs(close[2] - open[2]), high[2] - low[2], ta.atr(14)[1]], lookahead = barmerge.lookahead_on)
+
+// ───────────────────────── Per-bar work ─────────────────────────
+inWindow = bar_index > last_bar_index - maxBack
+chartSec = timeframe.in_seconds(timeframe.period)
+atrC     = ta.atr(14)
+
+// Events for alerts, reset every bar.
+evEnter = false
+evCE    = false
+evInv   = false
+
+// 1. Update the zones we already have (before adding this bar's new ones).
+if barstate.isconfirmed and array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        z = array.get(zones, i)
+        if z.state == "FILLED"
+            continue
+        if extendMode == "Until removed"
+            box.set_right(z.bx, time)
+            if not na(z.ce)
+                line.set_x2(z.ce, time)
+            if not na(z.lb)
+                label.set_x(z.lb, time)
+        far  = z.dir == 1 ? z.bot : z.top
+        near = z.dir == 1 ? z.top : z.bot
+        mid  = (z.top + z.bot) / 2
+        wickFar     = z.dir == 1 ? low <= far   : high >= far
+        bodyThrough = z.dir == 1 ? close <= far : close >= far
+        touchedMid  = z.dir == 1 ? low <= mid   : high >= mid
+        entered     = z.dir == 1 ? low <= near  : high >= near
+        isFilled    = fillMode == "Wick" ? wickFar : bodyThrough
+        if bodyThrough and z.inverted
+            kill(z)
+            array.remove(zones, i)
+        else if bodyThrough and showInv
+            invert(z)
+            evInv := true
+        else if isFilled
+            if onFilled == "Delete"
+                kill(z)
+                array.remove(zones, i)
+            else
+                dim(z)
+        else if touchedMid and z.state != "CE"
+            z.state := "CE"
+            evCE := true
+        else if entered and z.state == "FRESH"
+            z.state := "PARTIAL"
+            evEnter := true
+
+// 2. Chart-timeframe gaps. Candle 1 = [2], candle 2 = [1], candle 3 = [0].
+curBull = low > high[2]
+curBear = high < low[2]
+body2   = math.abs(close[1] - open[1])
+range2  = high[1] - low[1]
+if barstate.isconfirmed and inWindow
+    if curBull and passes(low, high[2], body2, range2, atrC)
+        newZone(low, high[2], 1, "", time[2])
+    if curBear and passes(low[2], high, body2, range2, atrC)
+        newZone(low[2], high, -1, "", time[2])
+
+// 3. Higher-timeframe gaps. Fetched every bar (Pine needs that), drawn once per new higher-timeframe bar.
+[b1, r1, bT1, bB1, rT1, rB1, t1, l1, bd1, rg1, a1] = htf(tf1)
+[b2, r2, bT2, bB2, rT2, rB2, t2, l2, bd2, rg2, a2] = htf(tf2)
+[b3, r3, bT3, bB3, rT3, rB3, t3, l3, bd3, rg3, a3] = htf(tf3)
+[b4, r4, bT4, bB4, rT4, rB4, t4, l4, bd4, rg4, a4] = htf(tf4)
+n1 = ta.change(t1) != 0
+n2 = ta.change(t2) != 0
+n3 = ta.change(t3) != 0
+n4 = ta.change(t4) != 0
+
+drawHtf(string tf, bool show, bool isNew, bool isBull, bool isBear, float bTop, float bBot, float rTop, float rBot, int leftT, float bd, float rg, float av) =>
+    if show and isNew and barstate.isconfirmed and inWindow and timeframe.in_seconds(tf) > chartSec
+        if isBull and passes(bTop, bBot, bd, rg, av)
+            newZone(bTop, bBot, 1, tfLabel(tf), leftT)
+        if isBear and passes(rTop, rBot, bd, rg, av)
+            newZone(rTop, rBot, -1, tfLabel(tf), leftT)
+
+drawHtf(tf1, s1, n1, b1, r1, bT1, bB1, rT1, rB1, l1, bd1, rg1, a1)
+drawHtf(tf2, s2, n2, b2, r2, bT2, bB2, rT2, rB2, l2, bd2, rg2, a2)
+drawHtf(tf3, s3, n3, b3, r3, bT3, bB3, rT3, rB3, l3, bd3, rg3, a3)
+drawHtf(tf4, s4, n4, b4, r4, bT4, bB4, rT4, rB4, l4, bd4, rg4, a4)
+
+// 4. Keep the last N live gaps per direction, oldest out first; cap the total so drawings stay under TradingView's limit.
+trimDir(int d) =>
+    cnt = 0
+    for z in zones
+        if z.dir == d and z.state != "FILLED"
+            cnt += 1
+    if cnt > maxPerDir
+        for i = 0 to array.size(zones) - 1
+            z = array.get(zones, i)
+            if z.dir == d and z.state != "FILLED"
+                kill(z)
+                array.remove(zones, i)
+                break
+
+if barstate.isconfirmed
+    trimDir(1)
+    trimDir(-1)
+while array.size(zones) > 150
+    kill(array.shift(zones))
+
+// ───────────────────────── Alerts (for the notification bot later) ─────────────────────────
+alertcondition(curBull, "New bullish FVG", "A new bullish fair value gap formed on the chart timeframe")
+alertcondition(curBear, "New bearish FVG", "A new bearish fair value gap formed on the chart timeframe")
+alertcondition(evEnter, "Price entered an FVG", "A wick entered a fair value gap")
+alertcondition(evCE, "Price touched a midpoint", "A wick reached the midpoint (CE) of a fair value gap")
+alertcondition(evInv, "FVG inverted", "A candle body closed through a fair value gap; it is now an inverted gap")
