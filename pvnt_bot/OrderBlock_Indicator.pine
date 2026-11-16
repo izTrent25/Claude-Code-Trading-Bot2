@@ -2,7 +2,7 @@
 // Order blocks, TJR style. Our own build; notes in research/NOTE_order_block_indicator.md.
 //
 // Rule in plain words (bullish; bearish is the mirror):
-//   1. Track swing highs and swing lows (a candle with `swingLen` lower highs on each side is a swing high).
+//   1. Track swing highs and swing lows (a candle with `swingLen`, default 3, lower highs on each side is a swing high).
 //   2. A structure break happens when a candle CLOSES above the last unbroken swing high.
 //      If the trend was down (or unknown), that break is a SHIFT. If it was already up, it is a continuation BOS.
 //   3. On a shift, find the lowest low of the down-trend being reversed (from where it began, or from the
@@ -18,8 +18,8 @@ indicator("Order Blocks (TJR rebuild)", "OB", overlay = true, max_boxes_count = 
 
 // ───────────────────────── Inputs ─────────────────────────
 gS = "Structure"
-swingLen   = input.int(5, "Swing length", minval = 1, maxval = 50, group = gS,
-     tooltip = "A swing high needs this many lower highs on each side (a swing low, higher lows). Bigger = only major swings.")
+swingLen   = input.int(3, "Swing length", minval = 1, maxval = 50, group = gS,
+     tooltip = "A swing high needs this many lower highs on each side (a swing low, higher lows). 3 reads shifts the way the eye does on 5m; 5 waits for bigger turns and makes fewer blocks.")
 maxLeg     = input.int(10, "Max candles in the leg", minval = 1, maxval = 50, group = gS,
      tooltip = "How far back from the turning candle the down leg (or up leg) may reach.")
 needSweep  = input.bool(false, "Require a liquidity sweep", group = gS,

@@ -1,7 +1,8 @@
 # Python twin of pvnt_bot/OrderBlock_Indicator.pine (defaults), drawn as an SVG chart for a visual check.
 # Usage: .venv/bin/python research/ob_visual_check.py 15min 3   (bar size, days back from the end of NQ 2026 data)
 import sys, pandas as pd
-L, MAXLEG, EXT, BARS = 5, 10, 20, sys.argv[1] if len(sys.argv) > 1 else "15min"
+import os
+L, MAXLEG, EXT, BARS = int(os.environ.get('SWING', 3)), 10, 20, sys.argv[1] if len(sys.argv) > 1 else "15min"
 d = pd.read_parquet('/Users/trent/Claude-Code-Trading-Bot/data/futures/NQ/2026.parquet')
 d = d.tz_convert('America/Chicago')
 b = d.resample(BARS, label='left', closed='left').agg({'open':'first','high':'max','low':'min','close':'last'}).dropna()

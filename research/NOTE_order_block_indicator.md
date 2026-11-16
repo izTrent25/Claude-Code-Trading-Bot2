@@ -21,8 +21,9 @@ a midpoint line, removing a block once price goes through it (close or wick), an
 
 ## The rule in plain words (bullish; bearish is the mirror)
 
-1. **Swings.** A swing high is a candle with 5 lower highs on each side (setting "Swing length").
-   A swing low is the mirror. A swing is only known 5 candles later, so nothing repaints.
+1. **Swings.** A swing high is a candle with 3 lower highs on each side (setting "Swing length",
+   default 3 since 15 Nov, was 5). A swing low is the mirror. A swing is only known 3 candles later, so
+   nothing repaints.
 2. **Structure break.** A candle **closes** above the last unbroken swing high.
    - If the trend was down (or unknown), that is a **shift**: the trend is now up.
    - If the trend was already up, it is a **continuation break (BOS)**. No new block (TJR: one per trend).
@@ -42,7 +43,7 @@ a midpoint line, removing a block once price goes through it (close or wick), an
 
 | Group | Setting | Default | Meaning |
 |---|---|---|---|
-| Structure | Swing length | 5 | bigger = only major swings, fewer blocks |
+| Structure | Swing length | 3 | 3 reads shifts like the eye on 5m; 5 waits for bigger turns, about 40% fewer blocks |
 | | Max candles in the leg | 10 | how far back the leg may reach from the turning candle |
 | | Require a liquidity sweep | off | only make a block if the turning low took out the previous swing low |
 | | Also make blocks on continuation breaks | off | off = one block per trend |
@@ -79,6 +80,24 @@ candles pulled from the chart. Both show the same two live blocks to the cent:
 
 On the chart the bullish box covers the down leg into Sunday's low and price has since come back to
 its top, the "return to the block" TJR describes.
+
+## Swing length changed from 5 to 3 (15 Nov)
+
+You drew a bearish block on MNQ 5m on the up leg into Sunday evening's 28,279 top. With swing length 5
+the indicator drew nothing, because neither dip in that rally had 5 higher lows on each side (the
+18:40 dip at 28,110.25 had only 4 candles before the 19:00 crash). The only confirmed swing low left was
+Friday's 27,767.75, still unbroken, so by the rule the trend was still up.
+
+With swing length 3 the 18:40 dip counts, the 19:00 candle closes below it at 28,048, and the block
+appears at **28,147 to 28,279 from Sunday 17:20**, matching your drawing. Cost, same candles:
+
+| Candles | Swing 5 | Swing 3 |
+|---|---|---|
+| MNQ chart, Thu to Sun | 9 blocks | 14 blocks |
+| NQ, 2 to 3 Nov | 12 blocks | 21 blocks |
+
+Only one block per direction stays on the chart, so the chart stays clean. Swing length is a choice
+about how big a turn must be before it counts; the backtest can compare 3 and 5 later.
 
 ## Open questions for the combined strategy
 
