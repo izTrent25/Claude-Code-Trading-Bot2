@@ -1,6 +1,6 @@
 //@version=6
 // COMBINED STRATEGY (work in progress). Indicators are added one by one; no backtest until the user says so.
-//   Part 1: FVG / iFVG rebuild           (pvnt_bot/FVG_iFVG_Indicator.pine)
+//   Part 1: FVG / iFVG rebuild           (pvnt_bot/FVG_iFVG_Indicator.pine), plus buy/sell volume bars per gap
 //   Part 2: Order blocks, TJR rebuild     (pvnt_bot/OrderBlock_Indicator.pine)
 //   Part 3: (next indicator goes here)
 // Setup signal (proposed, switchable):
@@ -50,6 +50,16 @@ s3  = input.bool(false, "Show higher timeframe 3", group = gT)
 tf4 = input.timeframe("D", "Higher timeframe 4", group = gT)
 s4  = input.bool(false, "Show higher timeframe 4", group = gT)
 
+gV = "FVG: buy/sell volume"
+showVol   = input.bool(true, "Buy/sell volume bars in each gap", group = gV,
+     tooltip = "Splits the middle (displacement) candle's volume into buying and selling, using a lower timeframe about 10x faster than the chart. Up-closing lower candles count as buying, down-closing as selling. Two bars show the split; they always add to 100%.")
+showTot   = input.bool(true, "Total volume text in each gap", group = gV)
+showDash  = input.bool(true, "Volume dashboard (top right)", group = gV)
+volUp     = input.color(color.rgb(26, 194, 216), "Buying bar", group = gV)
+volDn     = input.color(color.rgb(216, 118, 26), "Selling bar", group = gV)
+relSize   = input.float(0, "Minimum gap size, % of biggest gap in last 1000 bars", minval = 0, maxval = 100, step = 5, group = gF,
+     tooltip = "0 = off. 10 is a size filter some FVG indicators use: drops gaps smaller than a tenth of the biggest recent one.")
+
 gC = "FVG colors"
 bullCol  = input.color(#26a69a, "Bullish gap", group = gC)
 bearCol  = input.color(#ef5350, "Bearish gap", group = gC)
@@ -68,6 +78,10 @@ type Zone
     string state      // FRESH, PARTIAL, CE, FILLED
     bool   inverted
     string tfName
+    float  buyPct     // % of the middle candle's volume that was buying (na for higher-timeframe gaps)
+    float  totVol
+    box    buyBar
+    box    sellBar
 
 var zones = array.new<Zone>()
 barMs = timeframe.in_seconds(timeframe.period) * 1000
@@ -89,7 +103,7 @@ passes(float top, float bot, float body2, float range2, float atrv) =>
     sessOk = not useSess or not na(time(timeframe.period, sessStr, "America/New_York"))
     gapOk and dispOk and sessOk
 
-newZone(float top, float bot, int dir, string tfn, int leftT) =>
+newZone(float top, float bot, int dir, string tfn, int leftT, float buyPct = na, float totVol = na) =>
     col    = zoneColor(dir, false)
     rightT = extendMode == "Fixed" ? leftT + extendBars * barMs : time
     mid    = (top + bot) / 2
@@ -102,12 +116,29 @@ newZone(float top, float bot, int dir, string tfn, int leftT) =>
     if showLabels
         lb := label.new(rightT, mid, zoneText(tfn, false), xloc = xloc.bar_time, style = label.style_label_left,
              color = color.new(color.black, 100), textcolor = color.new(col, 0), size = size.small)
-    array.push(zones, Zone.new(bx, ce, lb, top, bot, dir, "FRESH", false, tfn))
+    if showTot and not na(totVol)
+        box.set_text(bx, str.tostring(totVol, format.volume))
+        box.set_text_halign(bx, text.align_right)
+        box.set_text_size(bx, size.small)
+        box.set_text_color(bx, color.new(chart.fg_color, 30))
+    box buyB  = na
+    box sellB = na
+    if showVol and not na(buyPct)
+        half = extendBars * barMs / 2   // a 100% bar reaches the middle of the box
+        sellB := box.new(leftT, top, leftT + int(half * (100 - buyPct) / 100), mid, xloc = xloc.bar_time,
+             bgcolor = color.new(volDn, 20), border_color = na, text = str.tostring(math.round(100 - buyPct)) + "%",
+             text_size = size.tiny, text_color = chart.fg_color, text_halign = text.align_right)
+        buyB := box.new(leftT, mid, leftT + int(half * buyPct / 100), bot, xloc = xloc.bar_time,
+             bgcolor = color.new(volUp, 20), border_color = na, text = str.tostring(math.round(buyPct)) + "%",
+             text_size = size.tiny, text_color = chart.fg_color, text_halign = text.align_right)
+    array.push(zones, Zone.new(bx, ce, lb, top, bot, dir, "FRESH", false, tfn, buyPct, totVol, buyB, sellB))
 
 kill(Zone z) =>
     box.delete(z.bx)
     line.delete(z.ce)
     label.delete(z.lb)
+    box.delete(z.buyBar)
+    box.delete(z.sellBar)
 
 invert(Zone z) =>
     z.inverted := true
@@ -130,6 +161,9 @@ dim(Zone z) =>
         line.set_color(z.ce, color.new(ceCol, 80))
     if not na(z.lb)
         label.set_textcolor(z.lb, color.new(col, 60))
+    if not na(z.buyBar)
+        box.set_bgcolor(z.buyBar, color.new(volUp, 80))
+        box.set_bgcolor(z.sellBar, color.new(volDn, 80))
 
 // Higher-timeframe gap check, non-repainting: values of the last COMPLETED higher-timeframe bar.
 // Returns: isBull, isBear, bullTop, bullBot, bearTop, bearBot, time of candle 3, time of candle 1,
@@ -192,11 +226,54 @@ curBull = low > high[2]
 curBear = high < low[2]
 body2   = math.abs(close[1] - open[1])
 range2  = high[1] - low[1]
-if barstate.isconfirmed and inWindow
+
+// Buy/sell volume of each candle, from a lower timeframe about 10x faster than the chart (1 minute at least).
+lowerTf  = str.tostring(math.max(1, math.ceil(timeframe.in_seconds(timeframe.period) / 60 / 10)))
+buyArr   = request.security_lower_tf(syminfo.tickerid, lowerTf, close > open ? volume : 0.0)
+sellArr  = request.security_lower_tf(syminfo.tickerid, lowerTf, close < open ? volume : 0.0)
+buyVol   = array.sum(buyArr)
+sellVol  = array.sum(sellArr)
+bsTotal  = buyVol + sellVol
+buyShare = bsTotal > 0 ? buyVol / bsTotal * 100 : na
+// middle candle = [1]; if the lower timeframe has no data, fall back to the candle's own volume for the total
+midBuy   = buyShare[1]
+midTot   = bsTotal[1] > 0 ? bsTotal[1] : volume[1]
+
+// Optional relative size filter: gap size vs the biggest gap of the last 1000 bars.
+gapSz    = curBull ? low - high[2] : curBear ? low[2] - high : 0.0
+bigGap   = ta.highest(gapSz, 1000)
+sizeOk   = relSize == 0 or (bigGap > 0 and gapSz / bigGap * 100 >= relSize)
+
+if barstate.isconfirmed and inWindow and sizeOk
     if curBull and passes(low, high[2], body2, range2, atrC)
-        newZone(low, high[2], 1, "", time[2])
+        newZone(low, high[2], 1, "", time[2], midBuy, midTot)
     if curBear and passes(low[2], high, body2, range2, atrC)
-        newZone(low[2], high, -1, "", time[2])
+        newZone(low[2], high, -1, "", time[2], midBuy, midTot)
+
+// Dashboard: live gaps per side and their summed volume.
+var dash = table.new(position.top_right, 3, 3, bgcolor = color.new(chart.bg_color, 10), border_width = 1)
+if showDash and barstate.islast
+    nB = 0
+    nS = 0
+    vB = 0.0
+    vS = 0.0
+    for z in zones
+        if z.state != "FILLED"
+            if z.dir == 1
+                nB += 1
+                vB += nz(z.totVol)
+            else
+                nS += 1
+                vS += nz(z.totVol)
+    table.cell(dash, 0, 0, "FVG", text_color = chart.fg_color, text_size = size.small)
+    table.cell(dash, 1, 0, "On chart", text_color = chart.fg_color, text_size = size.small)
+    table.cell(dash, 2, 0, "Total volume", text_color = chart.fg_color, text_size = size.small)
+    table.cell(dash, 0, 1, "Bullish", text_color = bullCol, text_size = size.small)
+    table.cell(dash, 1, 1, str.tostring(nB), text_color = chart.fg_color, text_size = size.small)
+    table.cell(dash, 2, 1, str.tostring(vB, format.volume), text_color = chart.fg_color, text_size = size.small)
+    table.cell(dash, 0, 2, "Bearish", text_color = bearCol, text_size = size.small)
+    table.cell(dash, 1, 2, str.tostring(nS), text_color = chart.fg_color, text_size = size.small)
+    table.cell(dash, 2, 2, str.tostring(vS, format.volume), text_color = chart.fg_color, text_size = size.small)
 
 // 3. Higher-timeframe gaps. Fetched every bar (Pine needs that), drawn once per new higher-timeframe bar.
 [b1, r1, bT1, bB1, rT1, rB1, t1, l1, bd1, rg1, a1] = htf(tf1)
@@ -472,13 +549,16 @@ alertcondition(evGone, "OB invalidated", "A candle went through an order block; 
 // ═════════════════════════ COMBINED SETUP ═════════════════════════
 gX = "Combined setup"
 showSig = input.bool(true, "Show setup signals", group = gX)
+minShare = input.float(0, "Gap volume must agree, min %", minval = 0, maxval = 100, step = 5, group = gX,
+     tooltip = "0 = off. Example 60: a bullish gap only counts if at least 60% of its middle candle's volume was buying (bearish: selling).")
 
 hitFvg(int dir, float obTop, float obBot) =>
     hit = false
     for z in zones
         fresh = box.get_left(z.bx) < time[2]   // not a gap made by this very candle
         overlap = z.bot <= obTop and z.top >= obBot
-        if fresh and overlap and z.dir == dir and not z.inverted and z.state != "FILLED"
+        volOk = minShare == 0 or na(z.buyPct) or (dir == 1 ? z.buyPct >= minShare : 100 - z.buyPct >= minShare)
+        if fresh and overlap and volOk and z.dir == dir and not z.inverted and z.state != "FILLED"
             entered = dir == 1 ? (low <= z.top and close > z.bot) : (high >= z.bot and close < z.top)
             if entered
                 hit := true
