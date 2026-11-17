@@ -1,0 +1,506 @@
+//@version=6
+// COMBINED STRATEGY (work in progress). Indicators are added one by one; no backtest until the user says so.
+//   Part 1: FVG / iFVG rebuild           (pvnt_bot/FVG_iFVG_Indicator.pine)
+//   Part 2: Order blocks, TJR rebuild     (pvnt_bot/OrderBlock_Indicator.pine)
+//   Part 3: (next indicator goes here)
+// Setup signal (proposed, switchable):
+//   LONG  = trend is up (last shift bullish), a live bullish order block exists, and price comes back into a
+//           bullish FVG that overlaps that block. One signal per block. Stop idea: below the block.
+//   SHORT = mirror. Target: not decided yet.
+// It only draws and marks signals. It is an indicator for now so nothing can be backtested by accident.
+indicator("Combined: FVG + Order Blocks", "FVG+OB", overlay = true, max_boxes_count = 500, max_lines_count = 500,
+     max_labels_count = 500, max_bars_back = 1000)
+
+// ═════════════════════════ PART 1: FAIR VALUE GAPS ═════════════════════════
+// ───────────────────────── Inputs ─────────────────────────
+gG = "FVG: general"
+fillMode   = input.string("Close", "Filled means", options = ["Wick", "Close"], group = gG,
+     tooltip = "Wick: a wick reaching the far edge of the gap fills it. Close: a candle has to close through the far edge.")
+onFilled   = input.string("Delete", "When filled", options = ["Delete", "Dim"], group = gG,
+     tooltip = "Delete removes a filled gap. Dim keeps it on the chart, faded and frozen.")
+showInv    = input.bool(false, "Show inverted gaps (iFVG)", group = gG,
+     tooltip = "A candle body closing through the far edge flips the gap into the opposite kind of level (dashed border). It is removed when a body closes back through it.")
+extendMode = input.string("Fixed", "Box length", options = ["Fixed", "Until removed"], group = gG)
+extendBars = input.int(20, "Fixed length (bars from candle 1)", minval = 1, maxval = 500, group = gG)
+showCE     = input.bool(true, "Midpoint line (CE)", group = gG)
+showLabels = input.bool(true, "Labels", group = gG)
+transp     = input.int(80, "Box transparency", minval = 0, maxval = 100, group = gG)
+dimTransp  = input.int(94, "Dimmed transparency", minval = 0, maxval = 100, group = gG)
+maxBack    = input.int(300, "Max bars back", minval = 20, maxval = 5000, group = gG,
+     tooltip = "Only look for new gaps within this many bars of the last bar. Higher loads slower.")
+maxPerDir  = input.int(30, "Max live gaps per direction", minval = 1, maxval = 150, group = gG)
+
+gF = "FVG: filters (0 = off)"
+minGapAtr = input.float(0.0, "Minimum gap size, x ATR(14)", minval = 0, step = 0.1, group = gF,
+     tooltip = "Skip gaps smaller than this many ATRs. 0.3 to 0.5 removes most micro-gaps in chop.")
+dispAtr   = input.float(0.0, "Middle candle body, x ATR(14)", minval = 0, step = 0.1, group = gF,
+     tooltip = "Require the middle (displacement) candle's body to be at least this many ATRs.")
+dispPct   = input.float(0.0, "Middle candle body, % of its range", minval = 0, maxval = 100, step = 5, group = gF,
+     tooltip = "Require the middle candle's body to be at least this share of its high-to-low range. 60 to 70 enforces a real push.")
+useSess   = input.bool(false, "Session filter", group = gF)
+sessStr   = input.session("0930-1100", "Session (New York time)", group = gF)
+
+gT = "FVG: higher timeframes (only drawn when above the chart's own timeframe)"
+tf1 = input.timeframe("15", "Higher timeframe 1", group = gT)
+s1  = input.bool(false, "Show higher timeframe 1", group = gT)
+tf2 = input.timeframe("60", "Higher timeframe 2", group = gT)
+s2  = input.bool(false, "Show higher timeframe 2", group = gT)
+tf3 = input.timeframe("240", "Higher timeframe 3", group = gT)
+s3  = input.bool(false, "Show higher timeframe 3", group = gT)
+tf4 = input.timeframe("D", "Higher timeframe 4", group = gT)
+s4  = input.bool(false, "Show higher timeframe 4", group = gT)
+
+gC = "FVG colors"
+bullCol  = input.color(#26a69a, "Bullish gap", group = gC)
+bearCol  = input.color(#ef5350, "Bearish gap", group = gC)
+iBullCol = input.color(#2962ff, "Inverted, now support", group = gC)
+iBearCol = input.color(#ff9800, "Inverted, now resistance", group = gC)
+ceCol    = input.color(#9598a1, "Midpoint line", group = gC)
+
+// ───────────────────────── Types and helpers ─────────────────────────
+type Zone
+    box    bx
+    line   ce
+    label  lb
+    float  top
+    float  bot
+    int    dir        // +1 = support (bullish), -1 = resistance (bearish)
+    string state      // FRESH, PARTIAL, CE, FILLED
+    bool   inverted
+    string tfName
+
+var zones = array.new<Zone>()
+barMs = timeframe.in_seconds(timeframe.period) * 1000
+
+tfLabel(string tf) =>
+    sec = timeframe.in_seconds(tf)
+    sec >= 604800 ? "W" : sec >= 86400 ? "D" : sec >= 3600 ? str.tostring(sec / 3600) + "h" : str.tostring(sec / 60) + "m"
+
+zoneColor(int dir, bool inverted) =>
+    inverted ? (dir == 1 ? iBullCol : iBearCol) : (dir == 1 ? bullCol : bearCol)
+
+zoneText(string tfn, bool inverted) =>
+    (tfn == "" ? "" : tfn + " ") + (inverted ? "iFVG" : "FVG")
+
+// Filters shared by chart and higher-timeframe gaps.
+passes(float top, float bot, float body2, float range2, float atrv) =>
+    gapOk  = minGapAtr == 0 or (top - bot) >= minGapAtr * atrv
+    dispOk = (dispAtr == 0 or body2 >= dispAtr * atrv) and (dispPct == 0 or body2 >= dispPct / 100 * range2)
+    sessOk = not useSess or not na(time(timeframe.period, sessStr, "America/New_York"))
+    gapOk and dispOk and sessOk
+
+newZone(float top, float bot, int dir, string tfn, int leftT) =>
+    col    = zoneColor(dir, false)
+    rightT = extendMode == "Fixed" ? leftT + extendBars * barMs : time
+    mid    = (top + bot) / 2
+    bx = box.new(leftT, top, rightT, bot, xloc = xloc.bar_time, border_color = color.new(col, 0), border_width = 1,
+         border_style = line.style_solid, bgcolor = color.new(col, transp))
+    line ce = na
+    if showCE
+        ce := line.new(leftT, mid, rightT, mid, xloc = xloc.bar_time, color = color.new(ceCol, 30), style = line.style_dotted)
+    label lb = na
+    if showLabels
+        lb := label.new(rightT, mid, zoneText(tfn, false), xloc = xloc.bar_time, style = label.style_label_left,
+             color = color.new(color.black, 100), textcolor = color.new(col, 0), size = size.small)
+    array.push(zones, Zone.new(bx, ce, lb, top, bot, dir, "FRESH", false, tfn))
+
+kill(Zone z) =>
+    box.delete(z.bx)
+    line.delete(z.ce)
+    label.delete(z.lb)
+
+invert(Zone z) =>
+    z.inverted := true
+    z.dir      := -z.dir
+    z.state    := "FRESH"
+    col = zoneColor(z.dir, true)
+    box.set_border_color(z.bx, color.new(col, 0))
+    box.set_border_style(z.bx, line.style_dashed)
+    box.set_bgcolor(z.bx, color.new(col, transp))
+    if not na(z.lb)
+        label.set_text(z.lb, zoneText(z.tfName, true))
+        label.set_textcolor(z.lb, color.new(col, 0))
+
+dim(Zone z) =>
+    z.state := "FILLED"
+    col = zoneColor(z.dir, z.inverted)
+    box.set_border_color(z.bx, color.new(col, 60))
+    box.set_bgcolor(z.bx, color.new(col, dimTransp))
+    if not na(z.ce)
+        line.set_color(z.ce, color.new(ceCol, 80))
+    if not na(z.lb)
+        label.set_textcolor(z.lb, color.new(col, 60))
+
+// Higher-timeframe gap check, non-repainting: values of the last COMPLETED higher-timeframe bar.
+// Returns: isBull, isBear, bullTop, bullBot, bearTop, bearBot, time of candle 3, time of candle 1,
+//          middle candle body, middle candle range, ATR(14).
+htf(string tf) =>
+    request.security(syminfo.tickerid, tf, [low[1] > high[3], high[1] < low[3], low[1], high[3], low[3], high[1], time[1], time[3],
+         math.abs(close[2] - open[2]), high[2] - low[2], ta.atr(14)[1]], lookahead = barmerge.lookahead_on)
+
+// ───────────────────────── Per-bar work ─────────────────────────
+inWindow = bar_index > last_bar_index - maxBack
+chartSec = timeframe.in_seconds(timeframe.period)
+atrC     = ta.atr(14)
+
+// Events for alerts, reset every bar.
+evEnter = false
+evCE    = false
+evInv   = false
+
+// 1. Update the zones we already have (before adding this bar's new ones).
+if barstate.isconfirmed and array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        z = array.get(zones, i)
+        if z.state == "FILLED"
+            continue
+        if extendMode == "Until removed"
+            box.set_right(z.bx, time)
+            if not na(z.ce)
+                line.set_x2(z.ce, time)
+            if not na(z.lb)
+                label.set_x(z.lb, time)
+        far  = z.dir == 1 ? z.bot : z.top
+        near = z.dir == 1 ? z.top : z.bot
+        mid  = (z.top + z.bot) / 2
+        wickFar     = z.dir == 1 ? low <= far   : high >= far
+        bodyThrough = z.dir == 1 ? close <= far : close >= far
+        touchedMid  = z.dir == 1 ? low <= mid   : high >= mid
+        entered     = z.dir == 1 ? low <= near  : high >= near
+        isFilled    = fillMode == "Wick" ? wickFar : bodyThrough
+        if bodyThrough and z.inverted
+            kill(z)
+            array.remove(zones, i)
+        else if bodyThrough and showInv
+            invert(z)
+            evInv := true
+        else if isFilled
+            if onFilled == "Delete"
+                kill(z)
+                array.remove(zones, i)
+            else
+                dim(z)
+        else if touchedMid and z.state != "CE"
+            z.state := "CE"
+            evCE := true
+        else if entered and z.state == "FRESH"
+            z.state := "PARTIAL"
+            evEnter := true
+
+// 2. Chart-timeframe gaps. Candle 1 = [2], candle 2 = [1], candle 3 = [0].
+curBull = low > high[2]
+curBear = high < low[2]
+body2   = math.abs(close[1] - open[1])
+range2  = high[1] - low[1]
+if barstate.isconfirmed and inWindow
+    if curBull and passes(low, high[2], body2, range2, atrC)
+        newZone(low, high[2], 1, "", time[2])
+    if curBear and passes(low[2], high, body2, range2, atrC)
+        newZone(low[2], high, -1, "", time[2])
+
+// 3. Higher-timeframe gaps. Fetched every bar (Pine needs that), drawn once per new higher-timeframe bar.
+[b1, r1, bT1, bB1, rT1, rB1, t1, l1, bd1, rg1, a1] = htf(tf1)
+[b2, r2, bT2, bB2, rT2, rB2, t2, l2, bd2, rg2, a2] = htf(tf2)
+[b3, r3, bT3, bB3, rT3, rB3, t3, l3, bd3, rg3, a3] = htf(tf3)
+[b4, r4, bT4, bB4, rT4, rB4, t4, l4, bd4, rg4, a4] = htf(tf4)
+n1 = ta.change(t1) != 0
+n2 = ta.change(t2) != 0
+n3 = ta.change(t3) != 0
+n4 = ta.change(t4) != 0
+
+drawHtf(string tf, bool show, bool isNew, bool isBull, bool isBear, float bTop, float bBot, float rTop, float rBot, int leftT, float bd, float rg, float av) =>
+    if show and isNew and barstate.isconfirmed and inWindow and timeframe.in_seconds(tf) > chartSec
+        if isBull and passes(bTop, bBot, bd, rg, av)
+            newZone(bTop, bBot, 1, tfLabel(tf), leftT)
+        if isBear and passes(rTop, rBot, bd, rg, av)
+            newZone(rTop, rBot, -1, tfLabel(tf), leftT)
+
+drawHtf(tf1, s1, n1, b1, r1, bT1, bB1, rT1, rB1, l1, bd1, rg1, a1)
+drawHtf(tf2, s2, n2, b2, r2, bT2, bB2, rT2, rB2, l2, bd2, rg2, a2)
+drawHtf(tf3, s3, n3, b3, r3, bT3, bB3, rT3, rB3, l3, bd3, rg3, a3)
+drawHtf(tf4, s4, n4, b4, r4, bT4, bB4, rT4, rB4, l4, bd4, rg4, a4)
+
+// 4. Keep the last N live gaps per direction, oldest out first; cap the total so drawings stay under TradingView's limit.
+trimDir(int d) =>
+    cnt = 0
+    for z in zones
+        if z.dir == d and z.state != "FILLED"
+            cnt += 1
+    if cnt > maxPerDir
+        for i = 0 to array.size(zones) - 1
+            z = array.get(zones, i)
+            if z.dir == d and z.state != "FILLED"
+                kill(z)
+                array.remove(zones, i)
+                break
+
+if barstate.isconfirmed
+    trimDir(1)
+    trimDir(-1)
+while array.size(zones) > 150
+    kill(array.shift(zones))
+
+// ───────────────────────── Alerts (for the notification bot later) ─────────────────────────
+alertcondition(curBull, "New bullish FVG", "A new bullish fair value gap formed on the chart timeframe")
+alertcondition(curBear, "New bearish FVG", "A new bearish fair value gap formed on the chart timeframe")
+alertcondition(evEnter, "Price entered an FVG", "A wick entered a fair value gap")
+alertcondition(evCE, "Price touched a midpoint", "A wick reached the midpoint (CE) of a fair value gap")
+alertcondition(evInv, "FVG inverted", "A candle body closed through a fair value gap; it is now an inverted gap")
+
+// ═════════════════════════ PART 2: ORDER BLOCKS ═════════════════════════
+
+// ───────────────────────── Inputs ─────────────────────────
+gOS = "Order blocks: structure"
+swingLen   = input.int(3, "Swing length", minval = 1, maxval = 50, group = gOS,
+     tooltip = "A swing high needs this many lower highs on each side (a swing low, higher lows). 3 reads shifts the way the eye does on 5m; 5 waits for bigger turns and makes fewer blocks.")
+maxLeg     = input.int(10, "Max candles in the leg", minval = 1, maxval = 50, group = gOS,
+     tooltip = "How far back from the turning candle the down leg (or up leg) may reach.")
+needSweep  = input.bool(false, "Require a liquidity sweep", group = gOS,
+     tooltip = "Only make a block if the turning low took out the previous swing low (high for bearish).")
+onContin   = input.bool(false, "Also make blocks on continuation breaks", group = gOS,
+     tooltip = "Off = one block per trend (TJR). On = every break of structure makes a new block.")
+
+gOB = "Order blocks: boxes"
+topMode    = input.string("Wick", "Box covers", options = ["Wick", "Body"], group = gOB,
+     tooltip = "Wick: full high-to-low range of the leg. Body: from the leg's highest candle body to its lowest low.")
+mitigation = input.string("Close", "Invalidated when", options = ["Close", "Wick"], group = gOB,
+     tooltip = "Close: a candle closes through the far side. Wick: any wick through the far side.")
+keepPerDir = input.int(1, "Blocks kept per direction", minval = 1, maxval = 10, group = gOB)
+obExtend = input.int(20, "Extend past current bar", minval = 0, maxval = 400, group = gOB)
+showMid    = input.bool(true, "Midpoint line", group = gOB)
+obLabels = input.bool(true, "Labels", group = gOB)
+showBreaks = input.bool(false, "Show structure breaks", group = gOB,
+     tooltip = "Dotted line at each broken swing, labelled Shift (trend change) or BOS (continuation).")
+
+gOC = "Order blocks: colors"
+obBullCol = input.color(#9c27b0, "Bullish block", group = gOC)
+obBearCol = input.color(#ff9800, "Bearish block", group = gOC)
+obTransp  = input.int(80, "Box transparency", minval = 0, maxval = 100, group = gOC)
+midCol  = input.color(#9598a1, "Midpoint line", group = gOC)
+
+// ───────────────────────── Types ─────────────────────────
+type OB
+    box   bx
+    line  mid
+    label lb
+    float top
+    float bot
+    int   dir      // +1 bullish (support), -1 bearish (resistance)
+    bool  touched
+    bool  fired    // a setup signal already fired from this block
+
+var obs = array.new<OB>()
+
+killOB(OB o) =>
+    box.delete(o.bx)
+    line.delete(o.mid)
+    label.delete(o.lb)
+
+// ───────────────────────── Swings ─────────────────────────
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float swHi = na
+var int   swHiIdx = na
+var bool  swHiBroken = true
+var float prevSwHi = na
+var float swLo = na
+var int   swLoIdx = na
+var bool  swLoBroken = true
+var float prevSwLo = na
+var int   trend = 0
+var int   bullBreakIdx = na   // bar where the current up-trend began (last bullish shift)
+var int   bearBreakIdx = na   // bar where the current down-trend began (last bearish shift)
+
+if not na(ph)
+    prevSwHi   := swHi
+    swHi       := ph
+    swHiIdx    := bar_index - swingLen
+    swHiBroken := false
+if not na(pl)
+    prevSwLo   := swLo
+    swLo       := pl
+    swLoIdx    := bar_index - swingLen
+    swLoBroken := false
+
+// ───────────────────────── Helpers ─────────────────────────
+// Find the order block leg for a break. dir = +1 looks for the lowest low since the broken swing high,
+// dir = -1 for the highest high since the broken swing low. Returns [top, bottom, offset of leg start,
+// turning price, offset of turning candle].
+findLeg(int dir, int span) =>
+    // the breaking candle itself (k = 0) is the displacement, never the block, so the search starts at k = 1
+    turnOff = 1
+    turnVal = dir == 1 ? low[1] : high[1]
+    for k = 1 to math.max(span, 1)
+        v = dir == 1 ? low[k] : high[k]
+        if (dir == 1 and v < turnVal) or (dir == -1 and v > turnVal)
+            turnVal := v
+            turnOff := k
+    legStart = turnOff
+    limit    = math.min(span, turnOff + maxLeg - 1)
+    if turnOff + 1 <= limit
+        for k = turnOff + 1 to limit
+            // bullish block: down-closing candles leading into the low; bearish: up-closing into the high
+            if (dir == 1 and close[k] < open[k]) or (dir == -1 and close[k] > open[k])
+                legStart := k
+            else
+                break
+    float top = na
+    float bot = na
+    for k = turnOff to legStart
+        hiK = topMode == "Wick" ? high[k] : math.max(open[k], close[k])
+        loK = topMode == "Wick" ? low[k]  : math.min(open[k], close[k])
+        // A turning candle that already closes the other way (a reversal candle) is part of the move away,
+        // so it only adds its extreme (its low for a bullish block, its high for a bearish one).
+        legColour = dir == 1 ? close[k] < open[k] : close[k] > open[k]
+        full      = k != turnOff or legColour or legStart == turnOff
+        if dir == 1
+            bot := na(bot) ? low[k] : math.min(bot, low[k])
+            if full
+                top := na(top) ? hiK : math.max(top, hiK)
+        else
+            top := na(top) ? high[k] : math.max(top, high[k])
+            if full
+                bot := na(bot) ? loK : math.min(bot, loK)
+    [top, bot, legStart, turnVal, turnOff]
+
+makeOB(int dir, float top, float bot, int leftIdx) =>
+    // one block per trend: drop the oldest of this direction once the limit is reached
+    cnt = 0
+    for o in obs
+        if o.dir == dir
+            cnt += 1
+    while cnt >= keepPerDir
+        for i = 0 to array.size(obs) - 1
+            o = array.get(obs, i)
+            if o.dir == dir
+                killOB(o)
+                array.remove(obs, i)
+                break
+        cnt -= 1
+    col = dir == 1 ? obBullCol : obBearCol
+    rightIdx = bar_index + obExtend
+    mid = (top + bot) / 2
+    bx = box.new(leftIdx, top, rightIdx, bot, border_color = color.new(col, 0), border_width = 1,
+         bgcolor = color.new(col, obTransp))
+    line ml = na
+    if showMid
+        ml := line.new(leftIdx, mid, rightIdx, mid, color = color.new(midCol, 30), style = line.style_dashed)
+    label lb = na
+    if obLabels
+        lb := label.new(rightIdx, mid, dir == 1 ? "Bull OB" : "Bear OB", style = label.style_label_left,
+             color = color.new(color.black, 100), textcolor = color.new(col, 0), size = size.small)
+    array.push(obs, OB.new(bx, ml, lb, top, bot, dir, false, false))
+
+drawBreak(int fromIdx, float level, bool isShift, int dir) =>
+    if showBreaks
+        col = dir == 1 ? obBullCol : obBearCol
+        line.new(fromIdx, level, bar_index, level, color = color.new(col, 20), style = line.style_dotted)
+        label.new(math.round((fromIdx + bar_index) / 2), level, isShift ? "Shift" : "BOS",
+             style = dir == 1 ? label.style_label_down : label.style_label_up,
+             color = color.new(color.black, 100), textcolor = col, size = size.tiny)
+
+// ───────────────────────── Per-bar work ─────────────────────────
+evBullNew = false
+evBearNew = false
+evOBEnter   = false
+evGone    = false
+
+// 1. Update existing blocks first (a block made on this bar is not tested against its own bar).
+if barstate.isconfirmed and array.size(obs) > 0
+    for i = array.size(obs) - 1 to 0
+        o = array.get(obs, i)
+        through = o.dir == 1 ? (mitigation == "Close" ? close < o.bot : low < o.bot) : (mitigation == "Close" ? close > o.top : high > o.top)
+        if through
+            killOB(o)
+            array.remove(obs, i)
+            evGone := true
+        else
+            box.set_right(o.bx, bar_index + obExtend)
+            if not na(o.mid)
+                line.set_x2(o.mid, bar_index + obExtend)
+            if not na(o.lb)
+                label.set_x(o.lb, bar_index + obExtend)
+            inside = o.dir == 1 ? low <= o.top : high >= o.bot
+            if inside and not o.touched
+                o.touched := true
+                evOBEnter := true
+
+// 2. Structure breaks and new blocks.
+if barstate.isconfirmed
+    if not swHiBroken and not na(swHi) and close > swHi
+        swHiBroken := true
+        isShift = trend != 1
+        trend := 1
+        drawBreak(swHiIdx, swHi, isShift, 1)
+        if isShift or onContin
+            // look back across the whole down-trend being reversed, so the block sits on the leg into its true low
+            fromIdx = isShift and not na(bearBreakIdx) ? math.min(swHiIdx, bearBreakIdx) : swHiIdx
+            span = math.min(bar_index - fromIdx, 500)
+            [t, b, legStart, turnVal, turnOff] = findLeg(1, span)
+            refLow = (not na(swLoIdx) and bar_index - swLoIdx == turnOff) ? prevSwLo : swLo
+            swept  = not na(refLow) and turnVal < refLow
+            if not needSweep or swept
+                makeOB(1, t, b, bar_index - legStart)
+                evBullNew := true
+        if isShift
+            bullBreakIdx := bar_index
+    if not swLoBroken and not na(swLo) and close < swLo
+        swLoBroken := true
+        isShift = trend != -1
+        trend := -1
+        drawBreak(swLoIdx, swLo, isShift, -1)
+        if isShift or onContin
+            // look back across the whole up-trend being reversed, so the block sits on the leg into its true high
+            fromIdx = isShift and not na(bullBreakIdx) ? math.min(swLoIdx, bullBreakIdx) : swLoIdx
+            span = math.min(bar_index - fromIdx, 500)
+            [t, b, legStart, turnVal, turnOff] = findLeg(-1, span)
+            refHigh = (not na(swHiIdx) and bar_index - swHiIdx == turnOff) ? prevSwHi : swHi
+            swept   = not na(refHigh) and turnVal > refHigh
+            if not needSweep or swept
+                makeOB(-1, t, b, bar_index - legStart)
+                evBearNew := true
+        if isShift
+            bearBreakIdx := bar_index
+
+// ───────────────────────── Alerts (for the notification bot later) ─────────────────────────
+alertcondition(evBullNew, "Bullish OB formed", "Bullish shift: a new bullish order block formed")
+alertcondition(evBearNew, "Bearish OB formed", "Bearish shift: a new bearish order block formed")
+alertcondition(evOBEnter, "Price returned to an OB", "Price came back into an order block")
+alertcondition(evGone, "OB invalidated", "A candle went through an order block; it was removed")
+
+// ═════════════════════════ COMBINED SETUP ═════════════════════════
+gX = "Combined setup"
+showSig = input.bool(true, "Show setup signals", group = gX)
+
+hitFvg(int dir, float obTop, float obBot) =>
+    hit = false
+    for z in zones
+        fresh = box.get_left(z.bx) < time[2]   // not a gap made by this very candle
+        overlap = z.bot <= obTop and z.top >= obBot
+        if fresh and overlap and z.dir == dir and not z.inverted and z.state != "FILLED"
+            entered = dir == 1 ? (low <= z.top and close > z.bot) : (high >= z.bot and close < z.top)
+            if entered
+                hit := true
+    hit
+
+longSig  = false
+shortSig = false
+float sigStop = na
+if barstate.isconfirmed
+    for o in obs
+        if not o.fired and ((o.dir == 1 and trend == 1) or (o.dir == -1 and trend == -1))
+            if hitFvg(o.dir, o.top, o.bot)
+                o.fired := true
+                if o.dir == 1
+                    longSig := true
+                    sigStop := o.bot
+                else
+                    shortSig := true
+                    sigStop := o.top
+
+plotshape(showSig and longSig,  "Long setup",  shape.triangleup,   location.belowbar, color.new(#00e676, 0), size = size.small, text = "L")
+plotshape(showSig and shortSig, "Short setup", shape.triangledown, location.abovebar, color.new(#ff1744, 0), size = size.small, text = "S")
+plot(showSig ? sigStop : na, "Setup stop", color.new(color.gray, 0), style = plot.style_circles, linewidth = 2)
+alertcondition(longSig,  "Long setup",  "Combined: price returned to a bullish FVG inside a bullish order block")
+alertcondition(shortSig, "Short setup", "Combined: price returned to a bearish FVG inside a bearish order block")
