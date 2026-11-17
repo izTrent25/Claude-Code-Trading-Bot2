@@ -2,7 +2,8 @@
 // COMBINED STRATEGY (work in progress). Indicators are added one by one; no backtest until the user says so.
 //   Part 1: FVG / iFVG rebuild           (pvnt_bot/FVG_iFVG_Indicator.pine), plus buy/sell volume bars per gap
 //   Part 2: Order blocks, TJR rebuild     (pvnt_bot/OrderBlock_Indicator.pine)
-//   Part 3: (next indicator goes here)
+//   Part 3: Swing points and liquidity    (own build of the idea in "Swing Points and Liquidity" by Leviathan)
+//   Part 4: (next indicator goes here)
 // Setup signal (proposed, switchable):
 //   LONG  = trend is up (last shift bullish), a live bullish order block exists, and price comes back into a
 //           bullish FVG that overlaps that block. One signal per block. Stop idea: below the block.
@@ -365,6 +366,7 @@ type OB
     int   dir      // +1 bullish (support), -1 bearish (resistance)
     bool  touched
     bool  fired    // a setup signal already fired from this block
+    int   madeIdx  // bar the block was made on
 
 var obs = array.new<OB>()
 
@@ -467,7 +469,7 @@ makeOB(int dir, float top, float bot, int leftIdx) =>
     if obLabels
         lb := label.new(rightIdx, mid, dir == 1 ? "Bull OB" : "Bear OB", style = label.style_label_left,
              color = color.new(color.black, 100), textcolor = color.new(col, 0), size = size.small)
-    array.push(obs, OB.new(bx, ml, lb, top, bot, dir, false, false))
+    array.push(obs, OB.new(bx, ml, lb, top, bot, dir, false, false, bar_index))
 
 drawBreak(int fromIdx, float level, bool isShift, int dir) =>
     if showBreaks
@@ -546,9 +548,99 @@ alertcondition(evBearNew, "Bearish OB formed", "Bearish shift: a new bearish ord
 alertcondition(evOBEnter, "Price returned to an OB", "Price came back into an order block")
 alertcondition(evGone, "OB invalidated", "A candle went through an order block; it was removed")
 
+// ═════════════════════════ PART 3: SWING LIQUIDITY ═════════════════════════
+// Big swing highs and lows are where stop orders pile up (liquidity). Each one gets a dotted line and a thin
+// box that extend right until price trades through the level (the liquidity is "taken" / swept). Then the
+// level stops extending and stays on the chart as history (or is hidden, a setting).
+gL = "Liquidity: swing points"
+liqRight   = input.int(10, "Candles right of the swing", minval = 1, maxval = 50, group = gL)
+liqLeft    = input.int(15, "Candles left of the swing", minval = 1, maxval = 50, group = gL,
+     tooltip = "A swing high must be the highest high of this many candles before it and the right number after it. Big numbers = only major levels. It is confirmed only after the right-side candles close.")
+liqShow    = input.bool(true, "Show liquidity levels", group = gL)
+liqBoxes   = input.bool(true, "Boxes", group = gL)
+liqDots    = input.bool(true, "Circle on each swing", group = gL)
+liqVolTxt  = input.bool(false, "Swing candle volume text", group = gL)
+liqHide    = input.bool(false, "Hide levels once taken", group = gL)
+liqBoxPct  = input.float(0.07, "Box height, % of price", minval = 0, step = 0.01, group = gL)
+liqMinVol  = input.float(0, "Only swings with volume above", minval = 0, group = gL)
+liqHiCol   = input.color(#aa2430, "Swing highs (liquidity above)", group = gL)
+liqLoCol   = input.color(#66bb6a, "Swing lows (liquidity below)", group = gL)
+
+type Liq
+    line  ln
+    box   bx
+    float level
+    int   dir      // +1 = swing high (buy stops above), -1 = swing low (sell stops below)
+
+var liqs = array.new<Liq>()
+var int lastHighSweepIdx = na   // last bar that took out a swing-high level
+var int lastLowSweepIdx  = na   // last bar that took out a swing-low level
+evLiqHi = false
+evLiqLo = false
+
+lPivHi = ta.pivothigh(high, liqLeft, liqRight)
+lPivLo = ta.pivotlow(low, liqLeft, liqRight)
+lVol   = volume[liqRight]
+lVolOk = liqMinVol == 0 or lVol > liqMinVol
+
+newLiq(float lvl, int dir) =>
+    col  = dir == 1 ? liqHiCol : liqLoCol
+    from = bar_index - liqRight
+    edge = dir == 1 ? lvl * (1 + liqBoxPct / 100) : lvl * (1 - liqBoxPct / 100)
+    box b = na
+    if liqShow and liqBoxes
+        b := box.new(from, math.max(lvl, edge), bar_index, math.min(lvl, edge), border_color = na,
+             bgcolor = color.new(col, 80), text = liqVolTxt ? str.tostring(lVol, format.volume) : "",
+             text_size = size.tiny, text_color = chart.fg_color, text_halign = text.align_right)
+    line l = na
+    if liqShow
+        l := line.new(from, lvl, bar_index, lvl, color = col, style = line.style_dotted)
+    array.push(liqs, Liq.new(l, b, lvl, dir))
+
+if barstate.isconfirmed
+    // check the levels we already have first, so a new level is not tested against its own candle
+    if array.size(liqs) > 0
+        for i = array.size(liqs) - 1 to 0
+            q = array.get(liqs, i)
+            taken = q.dir == 1 ? high >= q.level : low <= q.level
+            if taken
+                if q.dir == 1
+                    lastHighSweepIdx := bar_index
+                    evLiqHi := true
+                else
+                    lastLowSweepIdx := bar_index
+                    evLiqLo := true
+                line.set_x2(q.ln, bar_index)
+                box.set_right(q.bx, bar_index)
+                if liqHide
+                    line.delete(q.ln)
+                    box.delete(q.bx)
+                array.remove(liqs, i)
+            else
+                line.set_x2(q.ln, bar_index + 1)
+                box.set_right(q.bx, bar_index + 1)
+    if not na(lPivHi) and lVolOk
+        newLiq(lPivHi, 1)
+    if not na(lPivLo) and lVolOk
+        newLiq(lPivLo, -1)
+    while array.size(liqs) > 100
+        q = array.shift(liqs)
+        line.delete(q.ln)
+        box.delete(q.bx)
+
+plotshape(liqShow and liqDots and not na(lPivHi) and lVolOk ? lPivHi : na, "Swing high", shape.circle,
+     location.absolute, liqHiCol, offset = -liqRight, size = size.tiny)
+plotshape(liqShow and liqDots and not na(lPivLo) and lVolOk ? lPivLo : na, "Swing low", shape.circle,
+     location.absolute, liqLoCol, offset = -liqRight, size = size.tiny)
+alertcondition(evLiqHi, "Liquidity above taken", "Price traded through a swing-high liquidity level")
+alertcondition(evLiqLo, "Liquidity below taken", "Price traded through a swing-low liquidity level")
+
 // ═════════════════════════ COMBINED SETUP ═════════════════════════
 gX = "Combined setup"
 showSig = input.bool(true, "Show setup signals", group = gX)
+needLiq  = input.bool(false, "Require a liquidity sweep before the shift", group = gX,
+     tooltip = "TJR's full setup. Long: a swing-low liquidity level was taken within the window before the bullish order block formed. Short: a swing-high level.")
+liqWin   = input.int(30, "Sweep window, candles before the shift", minval = 1, maxval = 500, group = gX)
 minShare = input.float(0, "Gap volume must agree, min %", minval = 0, maxval = 100, step = 5, group = gX,
      tooltip = "0 = off. Example 60: a bullish gap only counts if at least 60% of its middle candle's volume was buying (bearish: selling).")
 
@@ -569,7 +661,9 @@ shortSig = false
 float sigStop = na
 if barstate.isconfirmed
     for o in obs
-        if not o.fired and ((o.dir == 1 and trend == 1) or (o.dir == -1 and trend == -1))
+        sweepIdx = o.dir == 1 ? lastLowSweepIdx : lastHighSweepIdx
+        liqOk = not needLiq or (not na(sweepIdx) and sweepIdx <= o.madeIdx and o.madeIdx - sweepIdx <= liqWin)
+        if liqOk and not o.fired and ((o.dir == 1 and trend == 1) or (o.dir == -1 and trend == -1))
             if hitFvg(o.dir, o.top, o.bot)
                 o.fired := true
                 if o.dir == 1
