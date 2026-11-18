@@ -1,7 +1,7 @@
 //@version=6
 // COMBINED STRATEGY (work in progress). Indicators are added one by one; no backtest until the user says so.
 //   Part 1: FVG / iFVG rebuild           (pvnt_bot/FVG_iFVG_Indicator.pine), plus buy/sell volume bars per gap
-//   Part 2: Order blocks, rule matched to the user's hand-drawn blocks on MNQ 15m (17 Nov 2026)
+//   Part 2: Order blocks: the leg before the liquidity sweep, one per trend, strong displacement
 //   Part 3: Swing points and liquidity    (own build of the idea in "Swing Points and Liquidity" by Leviathan)
 //   Part 4: (next indicator goes here)
 // Setup signal (proposed, switchable):
@@ -334,16 +334,16 @@ swingLen   = input.int(3, "Swing length", minval = 1, maxval = 50, group = gOS,
 maxLeg     = input.int(10, "Max candles in the leg", minval = 1, maxval = 50, group = gOS,
      tooltip = "How far back from the turning candle the down leg (or up leg) may reach.")
 dispMin    = input.float(2.0, "Displacement, min size x ATR(14)", minval = 0, step = 0.5, group = gOS,
-     tooltip = "The move from the order block candle to the breaking close must be at least this many ATRs. 0 = any size. Keeps out breaks made by a few small candles.")
+     tooltip = "The move from the sweep (turning extreme) to the breaking close must be at least this many ATRs. 0 = any size. Keeps out breaks made by a few small candles.")
 needSweep  = input.bool(false, "Require a liquidity sweep", group = gOS,
      tooltip = "Only make a block if the turning low took out the previous swing low (high for bearish).")
-onContin   = input.bool(true, "Also make blocks on continuation breaks", group = gOS,
-     tooltip = "On = every break of structure can make a block (needed for your Mon 16 Nov bearish block). Off = only trend shifts make blocks.")
+onContin   = input.bool(false, "Also make blocks on continuation breaks", group = gOS,
+     tooltip = "Off = one block per trend: a new one only forms after another shift (the rule). On = every break of structure can make a block.")
 
 gOB = "Order blocks: boxes"
 mitigation = input.string("Close", "Invalidated when", options = ["Close", "Wick"], group = gOB,
      tooltip = "Close: a candle closes through the far side. Wick: any wick through the far side.")
-keepPerDir = input.int(3, "Blocks kept per direction", minval = 1, maxval = 10, group = gOB)
+keepPerDir = input.int(1, "Blocks kept per direction", minval = 1, maxval = 10, group = gOB)
 obExtend = input.int(20, "Extend past current bar", minval = 0, maxval = 400, group = gOB)
 showMid    = input.bool(true, "Midpoint line", group = gOB)
 obLabels = input.bool(true, "Labels", group = gOB)
@@ -407,32 +407,46 @@ if not na(pl)
     swLoBroken := false
 
 // ───────────────────────── Helpers ─────────────────────────
-// Find the order block for a break (user's definition, 17 Nov 2026):
-//   1. price breaks market structure (a close through a swing),
-//   2. the move into the break is a strong displacement (at least `dispMin` x ATR(14), not a few small candles),
-//   3. the zone is the LAST OPPOSING CANDLE before that displacement: the last red candle before a move up
-//      (bullish block), the last green candle before a move down (bearish block). Box = that candle's high to low.
-// Returns [top, bottom, offset of the candle, (unused), price where the move started, its offset].
+// Find the order block for a SHIFT (the user's definition, 17 Nov 2026; see research/NOTE_order_block_indicator.md):
+//   The order block is the LEG of price immediately before the liquidity sweep: the range where the big orders
+//   got filled. One block per trend; a new one only forms after another shift.
+//   - The sweep is the turning extreme of the trend being reversed (lowest low before a bullish shift, highest
+//     high before a bearish one).
+//   - The leg is the run of opposing candles going INTO that extreme: red candles into the low (bullish block),
+//     green candles into the high (bearish block). A turning candle that already closes the other way (a reversal
+//     candle with a long wick) is the sweep itself, not part of the leg, so it is left out.
+//   - The move away (from the extreme to the breaking close) must be a strong displacement: at least `dispMin`
+//     x ATR(14), not a few small candles.
+// Returns [top, bottom, offset of the oldest leg candle, (unused), turning price, offset of turning candle].
 findLeg(int dir, int span) =>
+    // the breaking candle (k = 0) is the displacement, never the turning point
+    turnOff = 1
+    turnVal = dir == 1 ? low[1] : high[1]
+    for k = 1 to math.max(span, 1)
+        v = dir == 1 ? low[k] : high[k]
+        if (dir == 1 and v < turnVal) or (dir == -1 and v > turnVal)
+            turnVal := v
+            turnOff := k
     float top = na
     float bot = na
-    int   off = na
-    // walk back from the candle before the break to the first opposing candle
-    for k = 1 to math.max(span, 1)
-        opp = dir == 1 ? close[k] < open[k] : close[k] > open[k]
-        if opp
-            off := k
-            top := high[k]
-            bot := low[k]
-            break
-    // displacement = distance from the block's far edge to the breaking close
-    float startPx = na
-    if not na(off)
-        startPx := dir == 1 ? bot : top
-        moveSz  = dir == 1 ? close - startPx : startPx - close
-        if moveSz < dispMin * obAtr
-            off := na
-    [top, bot, off, false, startPx, off]
+    int   first = na
+    int   cnt = 0
+    k = (dir == 1 ? close[turnOff] < open[turnOff] : close[turnOff] > open[turnOff]) ? turnOff : turnOff + 1
+    while k <= span and cnt < maxLeg and (dir == 1 ? close[k] < open[k] : close[k] > open[k])
+        top := na(top) ? high[k] : math.max(top, high[k])
+        bot := na(bot) ? low[k] : math.min(bot, low[k])
+        first := k
+        cnt += 1
+        k += 1
+    if cnt == 0
+        // no opposing candles before the sweep: use the sweep candle itself
+        top := high[turnOff]
+        bot := low[turnOff]
+        first := turnOff
+    moveSz = dir == 1 ? close - turnVal : turnVal - close
+    if moveSz < dispMin * obAtr
+        first := na
+    [top, bot, first, false, turnVal, turnOff]
 
 // A new block sitting completely inside a live block of the same direction adds nothing, so it is skipped.
 nested(int dir, float top, float bot) =>

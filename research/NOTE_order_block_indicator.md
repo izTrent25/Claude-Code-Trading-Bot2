@@ -141,3 +141,18 @@ before the displacement; not every supply/demand area is an order block. The com
 
 On the same MNQ 15m candles: the Monday bearish block is now the 08:30 green candle, **27,485 to 27,717**.
 The Tuesday low gets no bullish block yet: the bounce has not broken a swing high with a 2-ATR move.
+
+## Final rule: the leg before the liquidity sweep, one per trend (17 Nov, last change)
+
+Your definition, combined with your clarification:
+
+- **Order block = the leg of price immediately before the liquidity sweep.** The sweep is the turning extreme of
+  the trend being reversed. The leg is the run of opposing candles into it: red candles into the low (bullish),
+  green candles into the high (bearish). A reversal candle with a long wick is the sweep itself and is left out.
+- **One per trend.** Only a shift (trend change) makes a block; continuation breaks (BOS) do not. 1 kept per side.
+- **Strong displacement.** The move from the sweep to the breaking close must be at least 2 x ATR(14).
+- **Return.** Price coming back into the block fires the "returned" alert. A close through the far side removes it.
+
+On the MNQ 15m chart candles the live block is the Tuesday bullish one, **26,829.75 to 27,335.00** from 09:00,
+exactly your drawn box. Monday's bearish box is not made: the trend was already down, so by "one per trend" that
+break was a continuation, not a new block.
