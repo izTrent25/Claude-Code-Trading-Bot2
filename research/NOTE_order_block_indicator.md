@@ -127,3 +127,17 @@ The combined script (`pvnt_bot/Combined_Strategy.pine`, part 2) now uses this ru
 Check: a Python run of the same rule on the 378 chart candles left exactly your two blocks live, to the tick,
 and the chart after "Update on chart" shows the same two. The standalone `OrderBlock_Indicator.pine` still has
 the old rule.
+
+## Rule replaced by your written definition (17 Nov, later)
+
+You clarified: strong displacement, a break of meaningful structure, and the zone is the **last opposing candle**
+before the displacement; not every supply/demand area is an order block. The combined script now does that:
+
+- Break: a close through a swing (swing length 3), trend turns or continues.
+- Displacement: from the block candle's far edge to the breaking close must be at least 2 x ATR(14) (setting).
+- Zone: the last red candle before a move up (bullish), the last green candle before a move down (bearish);
+  the box is that one candle's high to low.
+- Nested blocks skipped, 3 kept per side, removed on a close through the far side.
+
+On the same MNQ 15m candles: the Monday bearish block is now the 08:30 green candle, **27,485 to 27,717**.
+The Tuesday low gets no bullish block yet: the bounce has not broken a swing high with a 2-ATR move.

@@ -333,6 +333,8 @@ swingLen   = input.int(3, "Swing length", minval = 1, maxval = 50, group = gOS,
      tooltip = "A swing high needs this many lower highs on each side (a swing low, higher lows). 3 reads shifts the way the eye does on 5m; 5 waits for bigger turns and makes fewer blocks.")
 maxLeg     = input.int(10, "Max candles in the leg", minval = 1, maxval = 50, group = gOS,
      tooltip = "How far back from the turning candle the down leg (or up leg) may reach.")
+dispMin    = input.float(2.0, "Displacement, min size x ATR(14)", minval = 0, step = 0.5, group = gOS,
+     tooltip = "The move from the order block candle to the breaking close must be at least this many ATRs. 0 = any size. Keeps out breaks made by a few small candles.")
 needSweep  = input.bool(false, "Require a liquidity sweep", group = gOS,
      tooltip = "Only make a block if the turning low took out the previous swing low (high for bearish).")
 onContin   = input.bool(true, "Also make blocks on continuation breaks", group = gOS,
@@ -375,6 +377,8 @@ killOB(OB o) =>
     line.delete(o.mid)
     label.delete(o.lb)
 
+obAtr = ta.atr(14)
+
 // ───────────────────────── Swings ─────────────────────────
 ph = ta.pivothigh(high, swingLen, swingLen)
 pl = ta.pivotlow(low, swingLen, swingLen)
@@ -403,51 +407,32 @@ if not na(pl)
     swLoBroken := false
 
 // ───────────────────────── Helpers ─────────────────────────
-// Find the order block for a break (rule matched to the user's hand-drawn blocks, 17 Nov 2026).
-// Bullish: the run of red (down-closing) candles going INTO the lowest low before the break. If the lowest
-//   candle is already green (a reversal candle with a long wick), it is left out completely.
-// Bearish: the run of red candles that make the drop FROM the highest high: starting at the top candle if it is
-//   red, otherwise at the candle after it, through the breaking candle; it keeps growing while candles stay red.
-// Returns [top, bottom, offset of first candle, still growing, turning price, offset of turning candle].
+// Find the order block for a break (user's definition, 17 Nov 2026):
+//   1. price breaks market structure (a close through a swing),
+//   2. the move into the break is a strong displacement (at least `dispMin` x ATR(14), not a few small candles),
+//   3. the zone is the LAST OPPOSING CANDLE before that displacement: the last red candle before a move up
+//      (bullish block), the last green candle before a move down (bearish block). Box = that candle's high to low.
+// Returns [top, bottom, offset of the candle, (unused), price where the move started, its offset].
 findLeg(int dir, int span) =>
-    // the breaking candle (k = 0) is never the turning point, so the search starts at k = 1
-    turnOff = 1
-    turnVal = dir == 1 ? low[1] : high[1]
-    for k = 1 to math.max(span, 1)
-        v = dir == 1 ? low[k] : high[k]
-        if (dir == 1 and v < turnVal) or (dir == -1 and v > turnVal)
-            turnVal := v
-            turnOff := k
     float top = na
     float bot = na
-    int   first = na
-    int   cnt = 0
-    bool  growing = false
-    if dir == 1
-        k = close[turnOff] < open[turnOff] ? turnOff : turnOff + 1
-        while k <= span and cnt < maxLeg and close[k] < open[k]
-            top := na(top) ? high[k] : math.max(top, high[k])
-            bot := na(bot) ? low[k] : math.min(bot, low[k])
-            first := k
-            cnt += 1
-            k += 1
-    else
-        k = close[turnOff] < open[turnOff] ? turnOff : turnOff - 1
-        if k >= 0
-            first := k
-        while k >= 0 and cnt < maxLeg and close[k] < open[k]
-            top := na(top) ? high[k] : math.max(top, high[k])
-            bot := na(bot) ? low[k] : math.min(bot, low[k])
-            cnt += 1
-            growing := k == 0
-            k -= 1
-    if cnt == 0
-        // no red run: fall back to the turning candle itself
-        top := high[turnOff]
-        bot := low[turnOff]
-        first := turnOff
-        growing := false
-    [top, bot, first, growing, turnVal, turnOff]
+    int   off = na
+    // walk back from the candle before the break to the first opposing candle
+    for k = 1 to math.max(span, 1)
+        opp = dir == 1 ? close[k] < open[k] : close[k] > open[k]
+        if opp
+            off := k
+            top := high[k]
+            bot := low[k]
+            break
+    // displacement = distance from the block's far edge to the breaking close
+    float startPx = na
+    if not na(off)
+        startPx := dir == 1 ? bot : top
+        moveSz  = dir == 1 ? close - startPx : startPx - close
+        if moveSz < dispMin * obAtr
+            off := na
+    [top, bot, off, false, startPx, off]
 
 // A new block sitting completely inside a live block of the same direction adds nothing, so it is skipped.
 nested(int dir, float top, float bot) =>
@@ -548,7 +533,7 @@ if barstate.isconfirmed
             [t, b, legStart, gr, turnVal, turnOff] = findLeg(1, span)
             refLow = (not na(swLoIdx) and bar_index - swLoIdx == turnOff) ? prevSwLo : swLo
             swept  = not na(refLow) and turnVal < refLow
-            if (not needSweep or swept) and not nested(1, t, b)
+            if not na(legStart) and (not needSweep or swept) and not nested(1, t, b)
                 makeOB(1, t, b, bar_index - legStart, gr)
                 evBullNew := true
         if isShift
@@ -565,7 +550,7 @@ if barstate.isconfirmed
             [t, b, legStart, gr, turnVal, turnOff] = findLeg(-1, span)
             refHigh = (not na(swHiIdx) and bar_index - swHiIdx == turnOff) ? prevSwHi : swHi
             swept   = not na(refHigh) and turnVal > refHigh
-            if (not needSweep or swept) and not nested(-1, t, b)
+            if not na(legStart) and (not needSweep or swept) and not nested(-1, t, b)
                 makeOB(-1, t, b, bar_index - legStart, gr)
                 evBearNew := true
         if isShift
