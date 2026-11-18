@@ -182,6 +182,8 @@ atrC     = ta.atr(14)
 
 // Events for alerts, reset every bar.
 evEnter = false
+fvgRetBull = false   // a candle came back into a live bullish gap (without closing through it)
+fvgRetBear = false
 evCE    = false
 evInv   = false
 
@@ -205,6 +207,11 @@ if barstate.isconfirmed and array.size(zones) > 0
         touchedMid  = z.dir == 1 ? low <= mid   : high >= mid
         entered     = z.dir == 1 ? low <= near  : high >= near
         isFilled    = fillMode == "Wick" ? wickFar : bodyThrough
+        if entered and not bodyThrough
+            if z.dir == 1
+                fvgRetBull := true
+            else
+                fvgRetBear := true
         if bodyThrough and z.inverted
             kill(z)
             array.remove(zones, i)
@@ -498,6 +505,8 @@ drawBreak(int fromIdx, float level, bool isShift, int dir) =>
 evBullNew = false
 evBearNew = false
 evOBEnter   = false
+obRetBull   = false   // a candle came back into the live bullish order block
+obRetBear   = false
 evGone    = false
 
 // 1. Update existing blocks first (a block made on this bar is not tested against its own bar).
@@ -531,6 +540,11 @@ if barstate.isconfirmed and array.size(obs) > 0
             if not na(o.lb)
                 label.set_x(o.lb, bar_index + obExtend)
             inside = o.dir == 1 ? low <= o.top : high >= o.bot
+            if inside
+                if o.dir == 1
+                    obRetBull := true
+                else
+                    obRetBear := true
             if inside and not o.touched
                 o.touched := true
                 evOBEnter := true
@@ -897,6 +911,69 @@ alertcondition(evIBos == 1,   "Internal bullish BOS",   "Bullish break of struct
 alertcondition(evIBos == -1,  "Internal bearish BOS",   "Bearish break of structure (internal)")
 alertcondition(evIChoch == 1, "Internal bullish CHoCH", "Bullish change of character (internal)")
 alertcondition(evIChoch == -1,"Internal bearish CHoCH", "Bearish change of character (internal)")
+
+// ═════════════════════════ CONFIRMED BOS (the trade trigger) ═════════════════════════
+// Only signals a BOS when the full sequence happened, in this order (bullish; bearish is the mirror):
+//   1. ANCHOR: liquidity below was swept (part 3 level taken) or a new bullish order block formed (part 2).
+//   2. RETRACE: after that, price came back into a live bullish fair value gap (part 1) and/or the bullish
+//      order block, without closing through it.
+//   3. BOS: then a candle body closes above the most recent small swing high (part 4 internal structure).
+// All three must happen within the window. After a signal the sequence resets.
+gB2 = "Confirmed BOS signal"
+cbShow   = input.bool(true, "Show confirmed BOS", group = gB2)
+cbRetrOn = input.string("FVG or order block", "Retrace must reach", options = ["FVG or order block", "FVG only", "Order block only", "FVG and order block"], group = gB2)
+cbWin    = input.int(40, "Window, candles from anchor to BOS", minval = 5, maxval = 300, group = gB2)
+cbCol    = input.color(#2962ff, "Colour", group = gB2)
+
+var int cbBullAnchor = na
+var int cbBearAnchor = na
+var int cbBullFvg = na
+var int cbBullOb  = na
+var int cbBearFvg = na
+var int cbBearOb  = na
+cbLong  = false
+cbShort = false
+
+retOk(int f, int o) =>
+    cbRetrOn == "FVG only" ? not na(f) : cbRetrOn == "Order block only" ? not na(o) : cbRetrOn == "FVG and order block" ? (not na(f) and not na(o)) : (not na(f) or not na(o))
+
+if barstate.isconfirmed
+    // 3. the BOS first (any internal break: BOS or CHoCH), after the retrace, inside the window.
+    //    Checked before new anchors, because the same breaking candle often also creates a new order block.
+    if (evIBos == 1 or evIChoch == 1) and not na(cbBullAnchor) and bar_index - cbBullAnchor <= cbWin and retOk(cbBullFvg, cbBullOb)
+        cbLong := true
+        cbBullAnchor := na, cbBullFvg := na, cbBullOb := na
+    if (evIBos == -1 or evIChoch == -1) and not na(cbBearAnchor) and bar_index - cbBearAnchor <= cbWin and retOk(cbBearFvg, cbBearOb)
+        cbShort := true
+        cbBearAnchor := na, cbBearFvg := na, cbBearOb := na
+    // expire stale sequences
+    if not na(cbBullAnchor) and bar_index - cbBullAnchor > cbWin
+        cbBullAnchor := na, cbBullFvg := na, cbBullOb := na
+    if not na(cbBearAnchor) and bar_index - cbBearAnchor > cbWin
+        cbBearAnchor := na, cbBearFvg := na, cbBearOb := na
+    // 1. anchors: a sweep (re)starts the sequence; a new order block starts one only if none is running
+    if evLiqLo or (evBullNew and na(cbBullAnchor))
+        cbBullAnchor := bar_index, cbBullFvg := na, cbBullOb := na
+    if evLiqHi or (evBearNew and na(cbBearAnchor))
+        cbBearAnchor := bar_index, cbBearFvg := na, cbBearOb := na
+    // 2. retraces after the anchor (not on the anchor candle itself)
+    if not na(cbBullAnchor) and bar_index > cbBullAnchor
+        if fvgRetBull
+            cbBullFvg := bar_index
+        if obRetBull
+            cbBullOb := bar_index
+    if not na(cbBearAnchor) and bar_index > cbBearAnchor
+        if fvgRetBear
+            cbBearFvg := bar_index
+        if obRetBear
+            cbBearOb := bar_index
+
+if cbShow and cbLong
+    label.new(bar_index, low, "BOS ✓", style = label.style_label_up, color = cbCol, textcolor = color.white, size = size.small)
+if cbShow and cbShort
+    label.new(bar_index, high, "BOS ✓", style = label.style_label_down, color = cbCol, textcolor = color.white, size = size.small)
+alertcondition(cbLong,  "Confirmed bullish BOS", "Sweep or order block, retrace into FVG/OB, then bullish BOS")
+alertcondition(cbShort, "Confirmed bearish BOS", "Sweep or order block, retrace into FVG/OB, then bearish BOS")
 
 // ═════════════════════════ COMBINED SETUP ═════════════════════════
 gX = "Combined setup"
