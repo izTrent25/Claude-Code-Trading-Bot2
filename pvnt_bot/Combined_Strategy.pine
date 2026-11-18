@@ -694,11 +694,14 @@ alertcondition(evLiqLo, "Liquidity below taken", "Price traded through a swing-l
 //   - Premium/discount: top 5% of that range is premium (sell area), bottom 5% discount (buy area), middle equilibrium.
 // Decided on closed candles only, so nothing repaints. Old breaks are deleted so the chart stays readable.
 gM  = "Structure: BOS / CHoCH"
+msOnlyConf = input.bool(true, "Only show confirmed BOS / CHoCH", group = gM,
+     tooltip = "On: only breaks that come after a liquidity sweep or order block AND a pullback into a fair value gap or order block are drawn, and only the most recent few. Off: every break is drawn.")
 msSwingOn  = input.bool(true, "Swing structure (big turns)", group = gM)
 msSwingLen = input.int(50, "Swing size, candles", minval = 10, maxval = 200, group = gM)
 msIntOn    = input.bool(true, "Internal structure (small turns)", group = gM,
      tooltip = "Small BOS/CHoCH (dashed) inside the big swings. These are the short-term breaks TJR trades.")
-msIntLen   = input.int(5, "Internal size, candles", minval = 2, maxval = 20, group = gM)
+msIntLen   = input.int(3, "Internal size, candles", minval = 2, maxval = 20, group = gM,
+     tooltip = "A small swing low needs this many higher lows after it (a high, lower highs). 3 catches the pullback lows you mark on 5m.")
 msKeep     = input.int(30, "Breaks kept on the chart (each kind)", minval = 1, maxval = 50, group = gM)
 msNeedSw   = input.bool(true, "CHoCH needs a liquidity sweep", group = gM,
      tooltip = "On: a break against the trend is only called CHoCH if a liquidity level (part 3) was taken shortly before it. Off: every break against the trend is a CHoCH.")
@@ -818,7 +821,7 @@ if barstate.isconfirmed
         evIChoch := tag == "CHoCH" ? 1 : evIChoch
         evIBos   := tag == "BOS" ? 1 : evIBos
         iTrend := 1
-        if msIntOn
+        if msIntOn and not msOnlyConf
             drawBreak4(iHi, tag, msBullCol, true, true, iLines, iLabels)
     if not iLo.crossed and not na(iLo.level) and close < iLo.level and iLo.level != sLo.level
         iLo.crossed := true
@@ -826,7 +829,7 @@ if barstate.isconfirmed
         evIChoch := tag == "CHoCH" ? -1 : evIChoch
         evIBos   := tag == "BOS" ? -1 : evIBos
         iTrend := -1
-        if msIntOn
+        if msIntOn and not msOnlyConf
             drawBreak4(iLo, tag, msBearCol, true, false, iLines, iLabels)
     if not sHi.crossed and not na(sHi.level) and close > sHi.level
         sHi.crossed := true
@@ -834,7 +837,7 @@ if barstate.isconfirmed
         evSChoch := tag == "CHoCH" ? 1 : evSChoch
         evSBos   := tag == "BOS" ? 1 : evSBos
         sTrend := 1
-        if msSwingOn
+        if msSwingOn and not msOnlyConf
             drawBreak4(sHi, tag, msBullCol, false, true, sLines, sLabels)
     if not sLo.crossed and not na(sLo.level) and close < sLo.level
         sLo.crossed := true
@@ -842,7 +845,7 @@ if barstate.isconfirmed
         evSChoch := tag == "CHoCH" ? -1 : evSChoch
         evSBos   := tag == "BOS" ? -1 : evSBos
         sTrend := -1
-        if msSwingOn
+        if msSwingOn and not msOnlyConf
             drawBreak4(sLo, tag, msBearCol, false, false, sLines, sLabels)
 
 // strong / weak high and low, premium / discount zones (drawn once, on the last bar)
@@ -924,6 +927,9 @@ cbShow   = input.bool(true, "Show confirmed BOS", group = gB2)
 cbRetrOn = input.string("FVG or order block", "Retrace must reach", options = ["FVG or order block", "FVG only", "Order block only", "FVG and order block"], group = gB2)
 cbWin    = input.int(40, "Window, candles from anchor to BOS", minval = 5, maxval = 300, group = gB2)
 cbCol    = input.color(#2962ff, "Colour", group = gB2)
+cbKeep   = input.int(4, "Confirmed breaks kept on the chart", minval = 1, maxval = 50, group = gB2)
+var cbLines  = array.new<line>()
+var cbLabels = array.new<label>()
 
 var int cbBullAnchor = na
 var int cbBearAnchor = na
@@ -968,10 +974,16 @@ if barstate.isconfirmed
         if obRetBear
             cbBearOb := bar_index
 
-if cbShow and cbLong
-    label.new(bar_index, low, "BOS ✓", style = label.style_label_up, color = cbCol, textcolor = color.white, size = size.small)
-if cbShow and cbShort
-    label.new(bar_index, high, "BOS ✓", style = label.style_label_down, color = cbCol, textcolor = color.white, size = size.small)
+// draw a confirmed break: line from the broken swing to the breaking candle, labelled BOS or CHoCH
+if cbShow and (cbLong or cbShort)
+    p   = cbLong ? iHi : iLo
+    tag = (cbLong ? evIChoch == 1 : evIChoch == -1) ? "CHoCH" : "BOS"
+    cbLines.push(line.new(p.t, p.level, time, p.level, xloc = xloc.bar_time, color = cbCol, width = 2))
+    cbLabels.push(label.new(math.round((p.idx + bar_index) / 2), p.level, tag + " ✓", color = cbCol, textcolor = color.white,
+         style = cbLong ? label.style_label_down : label.style_label_up, size = size.small))
+    while cbLines.size() > cbKeep
+        line.delete(cbLines.shift())
+        label.delete(cbLabels.shift())
 alertcondition(cbLong,  "Confirmed bullish BOS", "Sweep or order block, retrace into FVG/OB, then bullish BOS")
 alertcondition(cbShort, "Confirmed bearish BOS", "Sweep or order block, retrace into FVG/OB, then bearish BOS")
 
