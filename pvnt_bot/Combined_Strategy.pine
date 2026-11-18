@@ -1,7 +1,7 @@
 //@version=6
 // COMBINED STRATEGY (work in progress). Indicators are added one by one; no backtest until the user says so.
 //   Part 1: FVG / iFVG rebuild           (pvnt_bot/FVG_iFVG_Indicator.pine), plus buy/sell volume bars per gap
-//   Part 2: Order blocks, TJR rebuild     (pvnt_bot/OrderBlock_Indicator.pine)
+//   Part 2: Order blocks, rule matched to the user's hand-drawn blocks on MNQ 15m (17 Nov 2026)
 //   Part 3: Swing points and liquidity    (own build of the idea in "Swing Points and Liquidity" by Leviathan)
 //   Part 4: (next indicator goes here)
 // Setup signal (proposed, switchable):
@@ -335,15 +335,13 @@ maxLeg     = input.int(10, "Max candles in the leg", minval = 1, maxval = 50, gr
      tooltip = "How far back from the turning candle the down leg (or up leg) may reach.")
 needSweep  = input.bool(false, "Require a liquidity sweep", group = gOS,
      tooltip = "Only make a block if the turning low took out the previous swing low (high for bearish).")
-onContin   = input.bool(false, "Also make blocks on continuation breaks", group = gOS,
-     tooltip = "Off = one block per trend (TJR). On = every break of structure makes a new block.")
+onContin   = input.bool(true, "Also make blocks on continuation breaks", group = gOS,
+     tooltip = "On = every break of structure can make a block (needed for your Mon 16 Nov bearish block). Off = only trend shifts make blocks.")
 
 gOB = "Order blocks: boxes"
-topMode    = input.string("Wick", "Box covers", options = ["Wick", "Body"], group = gOB,
-     tooltip = "Wick: full high-to-low range of the leg. Body: from the leg's highest candle body to its lowest low.")
 mitigation = input.string("Close", "Invalidated when", options = ["Close", "Wick"], group = gOB,
      tooltip = "Close: a candle closes through the far side. Wick: any wick through the far side.")
-keepPerDir = input.int(1, "Blocks kept per direction", minval = 1, maxval = 10, group = gOB)
+keepPerDir = input.int(3, "Blocks kept per direction", minval = 1, maxval = 10, group = gOB)
 obExtend = input.int(20, "Extend past current bar", minval = 0, maxval = 400, group = gOB)
 showMid    = input.bool(true, "Midpoint line", group = gOB)
 obLabels = input.bool(true, "Labels", group = gOB)
@@ -367,6 +365,8 @@ type OB
     bool  touched
     bool  fired    // a setup signal already fired from this block
     int   madeIdx  // bar the block was made on
+    int   leftIdx  // first candle of the block
+    bool  grow     // bearish block still adding red candles of the drop
 
 var obs = array.new<OB>()
 
@@ -403,11 +403,14 @@ if not na(pl)
     swLoBroken := false
 
 // ───────────────────────── Helpers ─────────────────────────
-// Find the order block leg for a break. dir = +1 looks for the lowest low since the broken swing high,
-// dir = -1 for the highest high since the broken swing low. Returns [top, bottom, offset of leg start,
-// turning price, offset of turning candle].
+// Find the order block for a break (rule matched to the user's hand-drawn blocks, 17 Nov 2026).
+// Bullish: the run of red (down-closing) candles going INTO the lowest low before the break. If the lowest
+//   candle is already green (a reversal candle with a long wick), it is left out completely.
+// Bearish: the run of red candles that make the drop FROM the highest high: starting at the top candle if it is
+//   red, otherwise at the candle after it, through the breaking candle; it keeps growing while candles stay red.
+// Returns [top, bottom, offset of first candle, still growing, turning price, offset of turning candle].
 findLeg(int dir, int span) =>
-    // the breaking candle itself (k = 0) is the displacement, never the block, so the search starts at k = 1
+    // the breaking candle (k = 0) is never the turning point, so the search starts at k = 1
     turnOff = 1
     turnVal = dir == 1 ? low[1] : high[1]
     for k = 1 to math.max(span, 1)
@@ -415,35 +418,46 @@ findLeg(int dir, int span) =>
         if (dir == 1 and v < turnVal) or (dir == -1 and v > turnVal)
             turnVal := v
             turnOff := k
-    legStart = turnOff
-    limit    = math.min(span, turnOff + maxLeg - 1)
-    if turnOff + 1 <= limit
-        for k = turnOff + 1 to limit
-            // bullish block: down-closing candles leading into the low; bearish: up-closing into the high
-            if (dir == 1 and close[k] < open[k]) or (dir == -1 and close[k] > open[k])
-                legStart := k
-            else
-                break
     float top = na
     float bot = na
-    for k = turnOff to legStart
-        hiK = topMode == "Wick" ? high[k] : math.max(open[k], close[k])
-        loK = topMode == "Wick" ? low[k]  : math.min(open[k], close[k])
-        // A turning candle that already closes the other way (a reversal candle) is part of the move away,
-        // so it only adds its extreme (its low for a bullish block, its high for a bearish one).
-        legColour = dir == 1 ? close[k] < open[k] : close[k] > open[k]
-        full      = k != turnOff or legColour or legStart == turnOff
-        if dir == 1
-            bot := na(bot) ? low[k] : math.min(bot, low[k])
-            if full
-                top := na(top) ? hiK : math.max(top, hiK)
-        else
+    int   first = na
+    int   cnt = 0
+    bool  growing = false
+    if dir == 1
+        k = close[turnOff] < open[turnOff] ? turnOff : turnOff + 1
+        while k <= span and cnt < maxLeg and close[k] < open[k]
             top := na(top) ? high[k] : math.max(top, high[k])
-            if full
-                bot := na(bot) ? loK : math.min(bot, loK)
-    [top, bot, legStart, turnVal, turnOff]
+            bot := na(bot) ? low[k] : math.min(bot, low[k])
+            first := k
+            cnt += 1
+            k += 1
+    else
+        k = close[turnOff] < open[turnOff] ? turnOff : turnOff - 1
+        if k >= 0
+            first := k
+        while k >= 0 and cnt < maxLeg and close[k] < open[k]
+            top := na(top) ? high[k] : math.max(top, high[k])
+            bot := na(bot) ? low[k] : math.min(bot, low[k])
+            cnt += 1
+            growing := k == 0
+            k -= 1
+    if cnt == 0
+        // no red run: fall back to the turning candle itself
+        top := high[turnOff]
+        bot := low[turnOff]
+        first := turnOff
+        growing := false
+    [top, bot, first, growing, turnVal, turnOff]
 
-makeOB(int dir, float top, float bot, int leftIdx) =>
+// A new block sitting completely inside a live block of the same direction adds nothing, so it is skipped.
+nested(int dir, float top, float bot) =>
+    inside = false
+    for o in obs
+        if o.dir == dir and o.bot <= bot and o.top >= top
+            inside := true
+    inside
+
+makeOB(int dir, float top, float bot, int leftIdx, bool growing) =>
     // one block per trend: drop the oldest of this direction once the limit is reached
     cnt = 0
     for o in obs
@@ -469,7 +483,7 @@ makeOB(int dir, float top, float bot, int leftIdx) =>
     if obLabels
         lb := label.new(rightIdx, mid, dir == 1 ? "Bull OB" : "Bear OB", style = label.style_label_left,
              color = color.new(color.black, 100), textcolor = color.new(col, 0), size = size.small)
-    array.push(obs, OB.new(bx, ml, lb, top, bot, dir, false, false, bar_index))
+    array.push(obs, OB.new(bx, ml, lb, top, bot, dir, false, false, bar_index, leftIdx, growing))
 
 drawBreak(int fromIdx, float level, bool isShift, int dir) =>
     if showBreaks
@@ -489,6 +503,21 @@ evGone    = false
 if barstate.isconfirmed and array.size(obs) > 0
     for i = array.size(obs) - 1 to 0
         o = array.get(obs, i)
+        if o.grow
+            // bearish block: the drop is still going (another red candle), so the box grows down with it
+            if close < open and bar_index - o.leftIdx < maxLeg
+                o.bot := math.min(o.bot, low)
+                o.top := math.max(o.top, high)
+                box.set_bottom(o.bx, o.bot)
+                box.set_top(o.bx, o.top)
+                m = (o.top + o.bot) / 2
+                if not na(o.mid)
+                    line.set_y1(o.mid, m)
+                    line.set_y2(o.mid, m)
+                if not na(o.lb)
+                    label.set_y(o.lb, m)
+            else
+                o.grow := false
         through = o.dir == 1 ? (mitigation == "Close" ? close < o.bot : low < o.bot) : (mitigation == "Close" ? close > o.top : high > o.top)
         if through
             killOB(o)
@@ -516,11 +545,11 @@ if barstate.isconfirmed
             // look back across the whole down-trend being reversed, so the block sits on the leg into its true low
             fromIdx = isShift and not na(bearBreakIdx) ? math.min(swHiIdx, bearBreakIdx) : swHiIdx
             span = math.min(bar_index - fromIdx, 500)
-            [t, b, legStart, turnVal, turnOff] = findLeg(1, span)
+            [t, b, legStart, gr, turnVal, turnOff] = findLeg(1, span)
             refLow = (not na(swLoIdx) and bar_index - swLoIdx == turnOff) ? prevSwLo : swLo
             swept  = not na(refLow) and turnVal < refLow
-            if not needSweep or swept
-                makeOB(1, t, b, bar_index - legStart)
+            if (not needSweep or swept) and not nested(1, t, b)
+                makeOB(1, t, b, bar_index - legStart, gr)
                 evBullNew := true
         if isShift
             bullBreakIdx := bar_index
@@ -533,11 +562,11 @@ if barstate.isconfirmed
             // look back across the whole up-trend being reversed, so the block sits on the leg into its true high
             fromIdx = isShift and not na(bullBreakIdx) ? math.min(swLoIdx, bullBreakIdx) : swLoIdx
             span = math.min(bar_index - fromIdx, 500)
-            [t, b, legStart, turnVal, turnOff] = findLeg(-1, span)
+            [t, b, legStart, gr, turnVal, turnOff] = findLeg(-1, span)
             refHigh = (not na(swHiIdx) and bar_index - swHiIdx == turnOff) ? prevSwHi : swHi
             swept   = not na(refHigh) and turnVal > refHigh
-            if not needSweep or swept
-                makeOB(-1, t, b, bar_index - legStart)
+            if (not needSweep or swept) and not nested(-1, t, b)
+                makeOB(-1, t, b, bar_index - legStart, gr)
                 evBearNew := true
         if isShift
             bearBreakIdx := bar_index

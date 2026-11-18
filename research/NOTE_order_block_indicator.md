@@ -104,3 +104,26 @@ about how big a turn must be before it counts; the backtest can compare 3 and 5 
 - Should a block require a liquidity sweep (TJR's full setup), or is any shift enough?
 - Entry at the box edge, the midpoint, or a fair value gap inside the box?
 - Does the block have to line up with a fair value gap from the first indicator?
+
+## Rule changed to match your hand-drawn blocks (17 Nov, MNQ 15m, combined script)
+
+You drew two blocks on MNQ 15m and said the top one is bearish and the bottom one bullish:
+
+| Block | Candles (CT) | Bottom | Top |
+|---|---|---|---|
+| Bearish | Mon 16 Nov 08:45 to 09:15 (3 red candles of the drop from the top) | 27,338.25 | 27,716.25 |
+| Bullish | Tue 17 Nov 09:00 to 09:30 (3 red candles into the low) | 26,829.75 | 27,335.00 |
+
+The combined script (`pvnt_bot/Combined_Strategy.pine`, part 2) now uses this rule:
+
+- **Bullish block:** the red candles going into the lowest low before the break. If the lowest candle is a green
+  reversal candle (Tuesday's long wick to 26,659), it is left out completely.
+- **Bearish block:** the red candles of the drop from the highest high, starting at the top candle if it is red,
+  otherwise the next one, through the breaking candle, and it keeps growing while candles stay red.
+- **Continuation breaks also make blocks** (Monday's break was a continuation: the trend was already down).
+- **A new block completely inside a live block of the same direction is skipped.**
+- **Up to 3 blocks per direction**; a candle closing past the far side removes a block (as you asked).
+
+Check: a Python run of the same rule on the 378 chart candles left exactly your two blocks live, to the tick,
+and the chart after "Update on chart" shows the same two. The standalone `OrderBlock_Indicator.pine` still has
+the old rule.
