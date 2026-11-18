@@ -637,7 +637,7 @@ alertcondition(evLiqLo, "Liquidity below taken", "Price traded through a swing-l
 
 // ═════════════════════════ COMBINED SETUP ═════════════════════════
 gX = "Combined setup"
-showSig = input.bool(true, "Show setup signals", group = gX)
+showSig = input.bool(false, "Show setup signals", group = gX)
 needLiq  = input.bool(false, "Require a liquidity sweep before the shift", group = gX,
      tooltip = "TJR's full setup. Long: a swing-low liquidity level was taken within the window before the bullish order block formed. Short: a swing-high level.")
 liqWin   = input.int(30, "Sweep window, candles before the shift", minval = 1, maxval = 500, group = gX)
