@@ -5,6 +5,7 @@
 //   Part 3: Swing points and liquidity    (own build of the idea in "Swing Points and Liquidity" by Leviathan)
 //   Part 4: Market structure: BOS / CHoCH, strong/weak high and low, premium/discount, previous D/W/M levels
 //           (own build of the structure ideas in LuxAlgo "Smart Money Concepts")
+//   THE SETUP: steps 1 to 7 of the trading plan (sweep, CHoCH with displacement, zone, entry, stop, target)
 //   Part 5: (next indicator goes here)
 // Setup signal (proposed, switchable):
 //   LONG  = trend is up (last shift bullish), a live bullish order block exists, and price comes back into a
@@ -621,6 +622,18 @@ var int lastHighSweepIdx = na   // last bar that took out a swing-high level
 var int lastLowSweepIdx  = na   // last bar that took out a swing-low level
 evLiqHi = false
 evLiqLo = false
+swpLoNow = false   // a swing-low level was swept: price ran through it and closed back above
+swpHiNow = false
+swpLoExt = low     // the sweep's extreme wick
+swpHiExt = high
+// a level taken with a close beyond it is still a sweep if price closes back inside within 3 candles (one 15m
+// candle on a 5m chart): these hold the pending one
+var float pendHiLvl = na
+var float pendHiExt = na
+var int   pendHiIdx = na
+var float pendLoLvl = na
+var float pendLoExt = na
+var int   pendLoIdx = na
 
 lPivHi = ta.pivothigh(high, liqLeft, liqRight)
 lPivLo = ta.pivotlow(low, liqLeft, liqRight)
@@ -647,6 +660,16 @@ if barstate.isconfirmed
         for i = array.size(liqs) - 1 to 0
             q = array.get(liqs, i)
             taken = q.dir == 1 ? high >= q.level : low <= q.level
+            if taken and q.dir == -1 and close > q.level
+                swpLoNow := true
+            if taken and q.dir == 1 and close < q.level
+                swpHiNow := true
+            if taken and q.dir == -1 and close <= q.level
+                pendLoLvl := na(pendLoLvl) ? q.level : math.max(pendLoLvl, q.level)
+                pendLoIdx := bar_index
+            if taken and q.dir == 1 and close >= q.level
+                pendHiLvl := na(pendHiLvl) ? q.level : math.min(pendHiLvl, q.level)
+                pendHiIdx := bar_index
             if taken
                 if q.dir == 1
                     lastHighSweepIdx := bar_index
@@ -671,6 +694,24 @@ if barstate.isconfirmed
         q = array.shift(liqs)
         line.delete(q.ln)
         box.delete(q.bx)
+
+if barstate.isconfirmed
+    if not na(pendHiLvl)
+        pendHiExt := na(pendHiExt) ? high : math.max(pendHiExt, high)
+        if bar_index > pendHiIdx and close < pendHiLvl
+            swpHiNow := true
+            swpHiExt := pendHiExt
+            pendHiLvl := na, pendHiExt := na
+        else if bar_index - pendHiIdx >= 3
+            pendHiLvl := na, pendHiExt := na
+    if not na(pendLoLvl)
+        pendLoExt := na(pendLoExt) ? low : math.min(pendLoExt, low)
+        if bar_index > pendLoIdx and close > pendLoLvl
+            swpLoNow := true
+            swpLoExt := pendLoExt
+            pendLoLvl := na, pendLoExt := na
+        else if bar_index - pendLoIdx >= 3
+            pendLoLvl := na, pendLoExt := na
 
 plotshape(liqShow and liqDots and not na(lPivHi) and lVolOk ? lPivHi : na, "Swing high", shape.circle,
      location.absolute, liqHiCol, offset = -liqRight, size = size.tiny)
@@ -923,7 +964,7 @@ alertcondition(evIChoch == -1,"Internal bearish CHoCH", "Bearish change of chara
 //   3. BOS: then a candle body closes above the most recent small swing high (part 4 internal structure).
 // All three must happen within the window. After a signal the sequence resets.
 gB2 = "Confirmed BOS signal"
-cbShow   = input.bool(true, "Show confirmed BOS", group = gB2)
+cbShow   = input.bool(false, "Show confirmed BOS", group = gB2)
 cbRetrOn = input.string("FVG or order block", "Retrace must reach", options = ["FVG or order block", "FVG only", "Order block only", "FVG and order block"], group = gB2)
 cbWin    = input.int(40, "Window, candles from anchor to BOS", minval = 5, maxval = 300, group = gB2)
 cbCol    = input.color(#2962ff, "Colour", group = gB2)
@@ -986,6 +1027,282 @@ if cbShow and (cbLong or cbShort)
         label.delete(cbLabels.shift())
 alertcondition(cbLong,  "Confirmed bullish BOS", "Sweep or order block, retrace into FVG/OB, then bullish BOS")
 alertcondition(cbShort, "Confirmed bearish BOS", "Sweep or order block, retrace into FVG/OB, then bearish BOS")
+
+// ═════════════════════════ THE SETUP (steps 1 to 7) ═════════════════════════
+// Draws the whole trade idea on the chart so it is easy to find (bullish; bearish is the mirror):
+//   1. SWEEP: price runs through a marked liquidity level (part 3 swing low, or the previous day's low) and
+//      CLOSES BACK INSIDE (above the level) on that candle or within the next 3 candles (a 15m candle on 5m).
+//   2. SHIFT: within `suShiftWin` candles a candle BODY closes above the last opposing swing high (the most
+//      recent small 3-candle swing high at that moment): a CHoCH. A later sweep only replaces the first if it
+//      goes further, so the stop always sits beyond the true extreme. It needs displacement: the shift candle's
+//      body is at least `suDisp` x ATR(14), or the move left a bullish fair value gap.
+//   3. ZONE: the FVG left by the displacement, the order block (the red candles into the sweep low) and the
+//      equilibrium (50% of the move from the sweep low to the shift high). Confluence = how many overlap.
+//   5. ENTRY: limit at the middle (50%, consequent encroachment) of that FVG; at equilibrium if there is none.
+//   6. STOP: a few ticks beyond the sweep's extreme wick.
+//   7. TARGET: the next liquidity pool on the other side (part 3 swing high or previous day's high) that gives
+//      at least `suMinR`; the pool after it is the runner target.
+// Not built yet: step 4 (the 1-minute trigger) and step 8 (managing the trade). No time-of-day filter.
+// The setup dies if a candle closes back beyond the swept extreme, if price reaches the target without
+// coming back to the entry ("no chasing"), or if the entry is not reached within `suFillWin` candles.
+gSU = "THE SETUP (sweep, shift, zone, entry)"
+suShow     = input.bool(true, "Show setups", group = gSU)
+suShiftWin = input.int(20, "Shift must come within, candles after the sweep", minval = 1, maxval = 200, group = gSU)
+suDisp     = input.float(1.0, "Displacement: shift candle body, x ATR(14)", minval = 0, step = 0.1, group = gSU,
+     tooltip = "The shift counts as displacement if the breaking candle's body is at least this many ATRs, OR the move left a fair value gap.")
+suTicks    = input.int(4, "Stop: ticks beyond the sweep wick", minval = 0, maxval = 100, group = gSU)
+suMinR     = input.float(2.0, "Minimum reward to risk for the target", minval = 0.5, step = 0.5, group = gSU)
+suFillWin  = input.int(30, "Entry must fill within, candles after the shift", minval = 1, maxval = 300, group = gSU)
+suKeep     = input.int(5, "Setups kept on the chart", minval = 1, maxval = 30, group = gSU)
+suBullCol  = input.color(#00897b, "Long setup", group = gSU)
+suBearCol  = input.color(#d32f2f, "Short setup", group = gSU)
+
+type Setup
+    int   dir
+    int   stage      // 0 idle, 1 swept (waiting for the shift), 2 shifted (waiting for the entry), 3 in the trade
+    int   sweepIdx
+    int   sweepT
+    float ext        // the sweep's extreme wick
+    float ref        // last opposing swing (the level the CHoCH must close through)
+    int   refT
+    int   refIdx
+    float legExt     // furthest price of the move away from the sweep (for equilibrium)
+    float obTop
+    float obBot
+    int   obT
+    float fvgTop
+    float fvgBot
+    int   shiftIdx
+    float entry
+    float stop
+    float t1
+    float t2
+    line  entryLn
+    label entryLb
+
+var suL = Setup.new(1, 0)
+var suS = Setup.new(-1, 0)
+var suLines  = array.new<line>()
+var suLabels = array.new<label>()
+var suBoxes  = array.new<box>()
+suEvSetupL = false
+suEvSetupS = false
+suEvFillL  = false
+suEvFillS  = false
+
+suTrim() =>
+    while suLines.size() > suKeep * 8
+        line.delete(suLines.shift())
+    while suLabels.size() > suKeep * 8
+        label.delete(suLabels.shift())
+    while suBoxes.size() > suKeep * 2
+        box.delete(suBoxes.shift())
+
+suLabel(int x, float y, string txt, color col, bool below) =>
+    if suShow
+        suLabels.push(label.new(x, y, txt, color = color(na), textcolor = col, size = size.small,
+             style = below ? label.style_label_up : label.style_label_down))
+        suTrim()
+
+// start (or restart) a setup on a sweep
+// a later sweep only replaces a waiting one if it goes further (a deeper low / higher high)
+suStart(Setup s, float extreme) =>
+    further = s.stage == 1 and (s.dir == 1 ? extreme < s.ext : extreme > s.ext)
+    if s.stage == 0 or further
+        s.stage    := 1
+        s.sweepIdx := bar_index
+        s.sweepT   := time
+        s.ext      := extreme
+        s.legExt   := s.dir == 1 ? high : low
+        // order block: the leg before the sweep = opposing candles into the sweep extreme (this candle included)
+        float t = na
+        float b = na
+        int   first = 0
+        for k = 0 to maxLeg - 1
+            opp = s.dir == 1 ? close[k] < open[k] : close[k] > open[k]
+            if not opp and k > 0
+                break
+            if opp or k == 0
+                t := na(t) ? high[k] : math.max(t, high[k])
+                b := na(b) ? low[k] : math.min(b, low[k])
+                first := k
+        s.obTop := t
+        s.obBot := b
+        s.obT   := time[first]
+
+// newest live FVG in the setup's direction that formed at or after the sweep
+suFvg(Setup s) =>
+    float ft = na
+    float fb = na
+    for z in zones
+        if z.dir == s.dir and not z.inverted and z.state != "FILLED" and box.get_left(z.bx) >= s.sweepT
+            ft := z.top
+            fb := z.bot
+    [ft, fb]
+
+// nearest liquidity pools beyond the entry on the target side (part 3 levels and the previous day's high/low)
+suTargets(Setup s) =>
+    risk = math.abs(s.entry - s.stop)
+    pools = array.new<float>()
+    for q in liqs
+        if q.dir == s.dir and (s.dir == 1 ? q.level > high : q.level < low)
+            pools.push(q.level)
+    pd = s.dir == 1 ? pdH : pdL
+    if not na(pd) and (s.dir == 1 ? pd > high : pd < low)
+        pools.push(pd)
+    if s.dir == 1
+        pools.sort(order.ascending)
+    else
+        pools.sort(order.descending)
+    float x1 = na
+    float x2 = na
+    for p in pools
+        r = risk > 0 ? math.abs(p - s.entry) / risk : 0
+        if na(x1)
+            if r >= suMinR
+                x1 := p
+        else if na(x2) and math.abs(p - x1) > 4 * syminfo.mintick
+            x2 := p
+    [x1, x2]
+
+suRiskTxt(Setup s, float tgt) =>
+    str.tostring(math.abs(tgt - s.entry) / math.abs(s.entry - s.stop), "#.0") + "R"
+
+// one bar of work for a setup
+suStep(Setup s, bool swept, float extreme) =>
+    evSet  = false
+    evFill = false
+    col = s.dir == 1 ? suBullCol : suBearCol
+    isL = s.dir == 1
+    // stage 3: in the trade
+    if s.stage == 3
+        hitStop = isL ? low <= s.stop : high >= s.stop
+        hitTgt  = isL ? high >= s.t1 : low <= s.t1
+        if hitStop
+            suLabel(bar_index, s.stop, "Stop  -1R", col, isL)
+            s.stage := 0
+        else if hitTgt
+            suLabel(bar_index, s.t1, "Target  +" + suRiskTxt(s, s.t1), col, not isL)
+            s.stage := 0
+    // stage 2: waiting for the retrace into the zone
+    else if s.stage == 2
+        if bar_index - s.shiftIdx <= 2 and na(s.fvgTop)
+            [ft, fb] = suFvg(s)
+            if not na(ft)
+                s.fvgTop := ft
+                s.fvgBot := fb
+                s.entry  := (ft + fb) / 2
+                line.set_y1(s.entryLn, s.entry)
+                line.set_y2(s.entryLn, s.entry)
+                label.set_y(s.entryLb, s.entry)
+                label.set_text(s.entryLb, "Entry (FVG 50%)")
+        dead   = isL ? close < s.ext : close > s.ext
+        filled = isL ? low <= s.entry : high >= s.entry
+        ran    = not na(s.t1) and (isL ? high >= s.t1 : low <= s.t1)
+        if dead
+            suLabel(bar_index, close, "Setup dead", color.gray, not isL)
+            s.stage := 0
+        else if filled
+            s.stage := 3
+            suLabel(bar_index, s.entry, "Entry", col, isL)
+            evFill := true
+            // a fill and a stop on the same candle count as a loss
+            if isL ? low <= s.stop : high >= s.stop
+                suLabel(bar_index, s.stop, "Stop  -1R", col, isL)
+                s.stage := 0
+        else if ran
+            suLabel(bar_index, s.t1, "Missed: no retrace", color.gray, not isL)
+            s.stage := 0
+        else if bar_index - s.shiftIdx > suFillWin
+            s.stage := 0
+    // stage 1: swept, waiting for the shift
+    else if s.stage == 1
+        if isL ? close < s.ext : close > s.ext
+            s.stage := 0
+        else
+            if isL ? low < s.ext : high > s.ext
+                s.ext := isL ? low : high
+            s.legExt := isL ? math.max(s.legExt, high) : math.min(s.legExt, low)
+            // the CHoCH: a candle body closes through the most recent small swing on the other side (part 4)
+            broke = isL ? (evIBos == 1 or evIChoch == 1) : (evIBos == -1 or evIChoch == -1)
+            if broke
+                s.ref    := isL ? iHi.level : iLo.level
+                s.refT   := isL ? iHi.t : iLo.t
+                s.refIdx := isL ? iHi.idx : iLo.idx
+            if bar_index - s.sweepIdx > suShiftWin
+                s.stage := 0
+            else if broke and bar_index > s.sweepIdx
+                [fA, fB] = suFvg(s)
+                ft = fA
+                fb = fB
+                disp = math.abs(close - open) >= suDisp * obAtr or not na(ft)
+                if disp
+                    s.stage    := 2
+                    s.shiftIdx := bar_index
+                    s.fvgTop   := ft
+                    s.fvgBot   := fb
+                    eq = (s.ext + s.legExt) / 2
+                    s.stop  := isL ? s.ext - suTicks * syminfo.mintick : s.ext + suTicks * syminfo.mintick
+                    s.entry := na(ft) ? eq : (ft + fb) / 2
+                    [x1, x2] = suTargets(s)
+                    s.t1 := x1
+                    s.t2 := x2
+                    // confluence: FVG, order block overlapping the entry area, equilibrium inside it
+                    zt = na(ft) ? eq : ft
+                    zb = na(ft) ? eq : fb
+                    conf = (na(ft) ? 0 : 1) + (s.obTop >= zb and s.obBot <= zt ? 1 : 0) + (eq <= zt and eq >= zb ? 1 : (eq <= s.obTop and eq >= s.obBot ? 1 : 0))
+                    evSet := true
+                    if suShow
+                        rightT = time + 30 * (time - time[1])
+                        suLabels.push(label.new(s.sweepT, s.ext, "Sweep", xloc = xloc.bar_time, color = color(na),
+                             textcolor = col, size = size.small, style = isL ? label.style_label_up : label.style_label_down))
+                        suLines.push(line.new(s.refT, s.ref, time, s.ref, xloc = xloc.bar_time, color = col, width = 2))
+                        suLabels.push(label.new(math.round((s.refIdx + bar_index) / 2), s.ref, "CHoCH", color = col,
+                             textcolor = color.white, size = size.small, style = isL ? label.style_label_down : label.style_label_up))
+                        suBoxes.push(box.new(s.obT, s.obTop, rightT, s.obBot, xloc = xloc.bar_time, border_color = color.new(col, 40),
+                             bgcolor = color.new(col, 88), text = "OB", text_size = size.tiny, text_color = col, text_halign = text.align_left))
+                        suLines.push(line.new(s.sweepT, eq, rightT, eq, xloc = xloc.bar_time, color = color.new(col, 30), style = line.style_dotted))
+                        s.entryLn := line.new(time, s.entry, rightT, s.entry, xloc = xloc.bar_time, color = col, width = 2)
+                        s.entryLb := label.new(rightT, s.entry, na(ft) ? "Entry (EQ 50%)" : "Entry (FVG 50%)", xloc = xloc.bar_time,
+                             style = label.style_label_left, color = color(na), textcolor = col, size = size.small)
+                        suLines.push(s.entryLn)
+                        suLabels.push(s.entryLb)
+                        suLines.push(line.new(time, s.stop, rightT, s.stop, xloc = xloc.bar_time, color = color.gray, width = 2))
+                        suLabels.push(label.new(rightT, s.stop, "Stop", xloc = xloc.bar_time, style = label.style_label_left,
+                             color = color(na), textcolor = color.gray, size = size.small))
+                        if not na(x1)
+                            suLines.push(line.new(time, x1, rightT, x1, xloc = xloc.bar_time, color = col, style = line.style_dashed))
+                            suLabels.push(label.new(rightT, x1, "Target " + suRiskTxt(s, x1), xloc = xloc.bar_time,
+                                 style = label.style_label_left, color = color(na), textcolor = col, size = size.small))
+                        if not na(x2)
+                            suLines.push(line.new(time, x2, rightT, x2, xloc = xloc.bar_time, color = col, style = line.style_dotted))
+                            suLabels.push(label.new(rightT, x2, "Runner " + suRiskTxt(s, x2), xloc = xloc.bar_time,
+                                 style = label.style_label_left, color = color(na), textcolor = col, size = size.small))
+                        suLabels.push(label.new(math.round((s.refIdx + bar_index) / 2), s.ref, "Confluence " + str.tostring(conf) + "/3",
+                             color = color(na), textcolor = col, size = size.tiny, style = isL ? label.style_label_up : label.style_label_down))
+                        suTrim()
+                    if na(x1)
+                        suLabel(bar_index, close, "No " + str.tostring(suMinR) + "R target: skip", color.gray, not isL)
+                        s.stage := 0
+    // a new sweep (re)starts an idle or waiting setup
+    if swept
+        suStart(s, extreme)
+    [evSet, evFill]
+
+if barstate.isconfirmed
+    pdSweepLo = not na(pdL) and low < pdL and close > pdL
+    pdSweepHi = not na(pdH) and high > pdH and close < pdH
+    [setL, fillL] = suStep(suL, swpLoNow or pdSweepLo, swpLoNow ? swpLoExt : low)
+    [setS, fillS] = suStep(suS, swpHiNow or pdSweepHi, swpHiNow ? swpHiExt : high)
+    suEvSetupL := setL
+    suEvFillL  := fillL
+    suEvSetupS := setS
+    suEvFillS  := fillS
+
+alertcondition(suEvSetupL, "SETUP long", "Sweep + CHoCH with displacement: long setup drawn, wait for the retrace to the entry")
+alertcondition(suEvSetupS, "SETUP short", "Sweep + CHoCH with displacement: short setup drawn, wait for the retrace to the entry")
+alertcondition(suEvFillL,  "SETUP long entry", "Price retraced to the long entry")
+alertcondition(suEvFillS,  "SETUP short entry", "Price retraced to the short entry")
 
 // ═════════════════════════ COMBINED SETUP ═════════════════════════
 gX = "Combined setup"
