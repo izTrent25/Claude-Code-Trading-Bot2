@@ -3,13 +3,15 @@
 //   Part 1: FVG / iFVG rebuild           (pvnt_bot/FVG_iFVG_Indicator.pine), plus buy/sell volume bars per gap
 //   Part 2: Order blocks: the leg before the liquidity sweep, one per trend, strong displacement
 //   Part 3: Swing points and liquidity    (own build of the idea in "Swing Points and Liquidity" by Leviathan)
-//   Part 4: (next indicator goes here)
+//   Part 4: Market structure: BOS / CHoCH, strong/weak high and low, premium/discount, previous D/W/M levels
+//           (own build of the structure ideas in LuxAlgo "Smart Money Concepts")
+//   Part 5: (next indicator goes here)
 // Setup signal (proposed, switchable):
 //   LONG  = trend is up (last shift bullish), a live bullish order block exists, and price comes back into a
 //           bullish FVG that overlaps that block. One signal per block. Stop idea: below the block.
 //   SHORT = mirror. Target: not decided yet.
 // It only draws and marks signals. It is an indicator for now so nothing can be backtested by accident.
-indicator("Combined: FVG + Order Blocks", "FVG+OB", overlay = true, max_boxes_count = 500, max_lines_count = 500,
+indicator("Combined: FVG + OB + Liquidity + Structure", "Combined", overlay = true, max_boxes_count = 500, max_lines_count = 500,
      max_labels_count = 500, max_bars_back = 1000)
 
 // ═════════════════════════ PART 1: FAIR VALUE GAPS ═════════════════════════
@@ -662,6 +664,228 @@ plotshape(liqShow and liqDots and not na(lPivLo) and lVolOk ? lPivLo : na, "Swin
      location.absolute, liqLoCol, offset = -liqRight, size = size.tiny)
 alertcondition(evLiqHi, "Liquidity above taken", "Price traded through a swing-high liquidity level")
 alertcondition(evLiqLo, "Liquidity below taken", "Price traded through a swing-low liquidity level")
+
+// ═════════════════════════ PART 4: MARKET STRUCTURE ═════════════════════════
+// Own build of the structure ideas in LuxAlgo's "Smart Money Concepts" (their order blocks, equal highs/lows and
+// fair value gaps are left out: parts 1 to 3 already cover those).
+//   - Swings: a swing high is a high that no candle beats for `size` candles after it (a swing low, the mirror).
+//   - BOS (break of structure): a candle closes past the last swing in the direction of the trend.
+//   - CHoCH (change of character): the first close past a swing against the trend, so the trend flips.
+//   - "Swing" structure uses big swings (50 candles), "internal" uses small ones (5 candles).
+//   - Strong/weak high and low: the extremes of the current swing range. In a down-trend the high is "strong"
+//     (it made the lows) and the low is "weak" (likely to break); the other way round in an up-trend.
+//   - Premium/discount: top 5% of that range is premium (sell area), bottom 5% discount (buy area), middle equilibrium.
+// Decided on closed candles only, so nothing repaints. Old breaks are deleted so the chart stays readable.
+gM  = "Structure: BOS / CHoCH"
+msSwingOn  = input.bool(true, "Swing structure (big turns)", group = gM)
+msSwingLen = input.int(50, "Swing size, candles", minval = 10, maxval = 200, group = gM)
+msIntOn    = input.bool(false, "Internal structure (small turns)", group = gM,
+     tooltip = "Small BOS/CHoCH inside the big swings. Off by default because it adds a lot of lines.")
+msIntLen   = input.int(5, "Internal size, candles", minval = 2, maxval = 20, group = gM)
+msKeep     = input.int(6, "Breaks kept on the chart (each kind)", minval = 1, maxval = 50, group = gM)
+msPoints   = input.bool(false, "Swing labels (HH, HL, LH, LL)", group = gM)
+msBullCol  = input.color(#089981, "Bullish", group = gM)
+msBearCol  = input.color(#F23645, "Bearish", group = gM)
+
+gMZ = "Structure: range and zones"
+msStrong   = input.bool(true, "Strong / weak high and low", group = gMZ)
+msZones    = input.bool(false, "Premium / discount zones", group = gMZ)
+msEqCol    = input.color(#878b94, "Equilibrium zone", group = gMZ)
+msCandles  = input.bool(false, "Colour candles by internal trend", group = gMZ)
+
+gML = "Structure: previous day / week / month high and low"
+lvlD   = input.bool(false, "Previous day", group = gML)
+lvlW   = input.bool(false, "Previous week", group = gML)
+lvlM   = input.bool(false, "Previous month", group = gML)
+lvlCol = input.color(#2157f3, "Colour", group = gML)
+
+type MsPivot
+    float level
+    float last
+    bool  crossed
+    int   t
+    int   idx
+
+var MsPivot sHi = MsPivot.new(na, na, true, na, na)
+var MsPivot sLo = MsPivot.new(na, na, true, na, na)
+var MsPivot iHi = MsPivot.new(na, na, true, na, na)
+var MsPivot iLo = MsPivot.new(na, na, true, na, na)
+var int sTrend = 0      // swing trend: +1 up, -1 down
+var int iTrend = 0      // internal trend
+var sLines  = array.new<line>()
+var sLabels = array.new<label>()
+var iLines  = array.new<line>()
+var iLabels = array.new<label>()
+// range for strong/weak and zones
+var float rTop = na
+var int   rTopT = na
+var float rBot = na
+var int   rBotT = na
+var int   rStartT = na
+var int   rStartIdx = na
+evSBos = 0
+evSChoch = 0
+evIBos = 0
+evIChoch = 0
+
+// leg: 0 after a new swing high (price now falling), 1 after a new swing low
+msLeg(int size) =>
+    var int lg = 0
+    hh = ta.highest(size)
+    ll = ta.lowest(size)
+    if high[size] > hh
+        lg := 0
+    else if low[size] < ll
+        lg := 1
+    lg
+
+sLeg = msLeg(msSwingLen)
+iLeg = msLeg(msIntLen)
+sNewLow  = ta.change(sLeg) == 1
+sNewHigh = ta.change(sLeg) == -1
+iNewLow  = ta.change(iLeg) == 1
+iNewHigh = ta.change(iLeg) == -1
+
+setPivot(MsPivot p, float lvl, int size) =>
+    p.last    := p.level
+    p.level   := lvl
+    p.crossed := false
+    p.t       := time[size]
+    p.idx     := bar_index - size
+
+if sNewLow
+    setPivot(sLo, low[msSwingLen], msSwingLen)
+    rBot := sLo.level, rBotT := sLo.t, rStartT := sLo.t, rStartIdx := sLo.idx
+    if msPoints
+        label.new(sLo.t, sLo.level, na(sLo.last) or sLo.level < sLo.last ? "LL" : "HL", xloc = xloc.bar_time,
+             style = label.style_label_up, color = color(na), textcolor = msBullCol, size = size.tiny)
+if sNewHigh
+    setPivot(sHi, high[msSwingLen], msSwingLen)
+    rTop := sHi.level, rTopT := sHi.t, rStartT := sHi.t, rStartIdx := sHi.idx
+    if msPoints
+        label.new(sHi.t, sHi.level, na(sHi.last) or sHi.level > sHi.last ? "HH" : "LH", xloc = xloc.bar_time,
+             style = label.style_label_down, color = color(na), textcolor = msBearCol, size = size.tiny)
+if iNewLow
+    setPivot(iLo, low[msIntLen], msIntLen)
+if iNewHigh
+    setPivot(iHi, high[msIntLen], msIntLen)
+
+// keep the range extremes up to date
+if na(rTop) or high > rTop
+    rTop := high, rTopT := time
+if na(rBot) or low < rBot
+    rBot := low, rBotT := time
+
+drawBreak4(MsPivot p, string tag, color col, bool small, bool up, array<line> ls, array<label> lbs) =>
+    ls.push(line.new(p.t, p.level, time, p.level, xloc = xloc.bar_time, color = col,
+         style = small ? line.style_dashed : line.style_solid))
+    lbs.push(label.new(math.round((p.idx + bar_index) / 2), p.level, tag, color = color(na), textcolor = col,
+         style = up ? label.style_label_down : label.style_label_up, size = small ? size.tiny : size.small))
+    while ls.size() > msKeep
+        line.delete(ls.shift())
+        label.delete(lbs.shift())
+
+if barstate.isconfirmed
+    // internal first (small swings), skipping levels that are also the swing level
+    if not iHi.crossed and not na(iHi.level) and close > iHi.level and iHi.level != sHi.level
+        iHi.crossed := true
+        tag = iTrend == -1 ? "CHoCH" : "BOS"
+        evIChoch := tag == "CHoCH" ? 1 : evIChoch
+        evIBos   := tag == "BOS" ? 1 : evIBos
+        iTrend := 1
+        if msIntOn
+            drawBreak4(iHi, tag, msBullCol, true, true, iLines, iLabels)
+    if not iLo.crossed and not na(iLo.level) and close < iLo.level and iLo.level != sLo.level
+        iLo.crossed := true
+        tag = iTrend == 1 ? "CHoCH" : "BOS"
+        evIChoch := tag == "CHoCH" ? -1 : evIChoch
+        evIBos   := tag == "BOS" ? -1 : evIBos
+        iTrend := -1
+        if msIntOn
+            drawBreak4(iLo, tag, msBearCol, true, false, iLines, iLabels)
+    if not sHi.crossed and not na(sHi.level) and close > sHi.level
+        sHi.crossed := true
+        tag = sTrend == -1 ? "CHoCH" : "BOS"
+        evSChoch := tag == "CHoCH" ? 1 : evSChoch
+        evSBos   := tag == "BOS" ? 1 : evSBos
+        sTrend := 1
+        if msSwingOn
+            drawBreak4(sHi, tag, msBullCol, false, true, sLines, sLabels)
+    if not sLo.crossed and not na(sLo.level) and close < sLo.level
+        sLo.crossed := true
+        tag = sTrend == 1 ? "CHoCH" : "BOS"
+        evSChoch := tag == "CHoCH" ? -1 : evSChoch
+        evSBos   := tag == "BOS" ? -1 : evSBos
+        sTrend := -1
+        if msSwingOn
+            drawBreak4(sLo, tag, msBearCol, false, false, sLines, sLabels)
+
+// strong / weak high and low, premium / discount zones (drawn once, on the last bar)
+var line  swHiLn = na
+var line  swLoLn = na
+var label swHiLb = na
+var label swLoLb = na
+var box   zPrem = na
+var box   zEq   = na
+var box   zDisc = na
+if barstate.islast and not na(rTop) and not na(rBot)
+    rightT = time + 20 * (time - time[1])
+    line.delete(swHiLn), line.delete(swLoLn), label.delete(swHiLb), label.delete(swLoLb)
+    box.delete(zPrem), box.delete(zEq), box.delete(zDisc)
+    if msStrong
+        swHiLn := line.new(rTopT, rTop, rightT, rTop, xloc = xloc.bar_time, color = msBearCol)
+        swHiLb := label.new(rightT, rTop, sTrend == -1 ? "Strong High" : "Weak High", xloc = xloc.bar_time,
+             style = label.style_label_left, color = color(na), textcolor = msBearCol, size = size.tiny)
+        swLoLn := line.new(rBotT, rBot, rightT, rBot, xloc = xloc.bar_time, color = msBullCol)
+        swLoLb := label.new(rightT, rBot, sTrend == 1 ? "Strong Low" : "Weak Low", xloc = xloc.bar_time,
+             style = label.style_label_left, color = color(na), textcolor = msBullCol, size = size.tiny)
+    if msZones and not na(rStartT)
+        zPrem := box.new(rStartT, rTop, time, 0.95 * rTop + 0.05 * rBot, xloc = xloc.bar_time, border_color = color(na),
+             bgcolor = color.new(msBearCol, 80), text = "Premium", text_size = size.tiny, text_color = msBearCol)
+        zEq   := box.new(rStartT, 0.525 * rTop + 0.475 * rBot, time, 0.525 * rBot + 0.475 * rTop, xloc = xloc.bar_time,
+             border_color = color(na), bgcolor = color.new(msEqCol, 80), text = "Equilibrium", text_size = size.tiny, text_color = msEqCol)
+        zDisc := box.new(rStartT, 0.95 * rBot + 0.05 * rTop, time, rBot, xloc = xloc.bar_time, border_color = color(na),
+             bgcolor = color.new(msBullCol, 80), text = "Discount", text_size = size.tiny, text_color = msBullCol)
+
+plotcandle(msCandles ? open : na, high, low, close, "Trend candles", color = iTrend == 1 ? msBullCol : msBearCol,
+     wickcolor = iTrend == 1 ? msBullCol : msBearCol, bordercolor = iTrend == 1 ? msBullCol : msBearCol, display = display.pane)
+
+// previous day / week / month high and low
+prevLevels(string tf) =>
+    request.security(syminfo.tickerid, tf, [high[1], low[1], time[1]], lookahead = barmerge.lookahead_on)
+[pdH, pdL, pdT] = prevLevels("D")
+[pwH, pwL, pwT] = prevLevels("W")
+[pmH, pmL, pmT] = prevLevels("M")
+var lvlLines  = array.new<line>()
+var lvlLabels = array.new<label>()
+drawLvl(bool show, string tf, float hi, float lo, int t, string name) =>
+    if show and timeframe.in_seconds() < timeframe.in_seconds(tf) and not na(hi)
+        rightT = time + 20 * (time - time[1])
+        lvlLines.push(line.new(t, hi, rightT, hi, xloc = xloc.bar_time, color = lvlCol))
+        lvlLines.push(line.new(t, lo, rightT, lo, xloc = xloc.bar_time, color = lvlCol))
+        lvlLabels.push(label.new(rightT, hi, "P" + name + "H", xloc = xloc.bar_time, style = label.style_label_left,
+             color = color(na), textcolor = lvlCol, size = size.tiny))
+        lvlLabels.push(label.new(rightT, lo, "P" + name + "L", xloc = xloc.bar_time, style = label.style_label_left,
+             color = color(na), textcolor = lvlCol, size = size.tiny))
+if barstate.islast
+    for l in lvlLines
+        line.delete(l)
+    for l in lvlLabels
+        label.delete(l)
+    lvlLines.clear()
+    lvlLabels.clear()
+    drawLvl(lvlD, "D", pdH, pdL, pdT, "D")
+    drawLvl(lvlW, "W", pwH, pwL, pwT, "W")
+    drawLvl(lvlM, "M", pmH, pmL, pmT, "M")
+
+alertcondition(evSBos == 1,   "Swing bullish BOS",   "Bullish break of structure (swing)")
+alertcondition(evSBos == -1,  "Swing bearish BOS",   "Bearish break of structure (swing)")
+alertcondition(evSChoch == 1, "Swing bullish CHoCH", "Bullish change of character (swing)")
+alertcondition(evSChoch == -1,"Swing bearish CHoCH", "Bearish change of character (swing)")
+alertcondition(evIBos == 1,   "Internal bullish BOS",   "Bullish break of structure (internal)")
+alertcondition(evIBos == -1,  "Internal bearish BOS",   "Bearish break of structure (internal)")
+alertcondition(evIChoch == 1, "Internal bullish CHoCH", "Bullish change of character (internal)")
+alertcondition(evIChoch == -1,"Internal bearish CHoCH", "Bearish change of character (internal)")
 
 // ═════════════════════════ COMBINED SETUP ═════════════════════════
 gX = "Combined setup"
