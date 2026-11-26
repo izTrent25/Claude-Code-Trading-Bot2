@@ -1,21 +1,36 @@
-# The setup (your 8-step plan), drawn by the combined indicator (18 Nov 2026)
+# The setup: TJR sequence, graded (rebuilt 26 Nov 2026)
 
-`pvnt_bot/Combined_Strategy.pine`, section "THE SETUP". No time-of-day filter (you said to leave time out).
+`pvnt_bot/Combined_Strategy.pine`, section "THE SETUP: TJR sequence, graded". Replaces the 18 Nov version.
 
-| Step | Your plan | What the indicator does |
+## Why the 18 Nov version gave bad signals (review of the user's ES/BTC screenshots, 26 Nov)
+
+1. No higher-timeframe bias: longs and shorts anywhere (ES 20 Nov counter-trend long, stopped out).
+2. Longs and shorts could be live together (ES 25-26 Nov, BTC 26 Nov ranges).
+3. Every chart swing counted as liquidity; levels not ranked.
+4. A sweep could pair with an unrelated break up to 20 candles later.
+5. Any break counted as the shift (continuation BOS too), and the swing could be minor.
+6. Displacement passed on 1 x ATR body OR any gap anywhere after the sweep.
+7. Zone was the newest gap, or the 50% line with no gap.
+8. Entry filled on a touch; no 1-minute confirmation.
+9. "Confluence n/3" counted labels; only sweep + break + 2R were mandatory.
+10. Very wide stops were allowed.
+
+## The rules now (the user's answers, 26 Nov)
+
+| # | Mandatory for A | Rule in the code |
 |---|---|---|
-| 1 Sweep | price runs through a marked level and closes back inside on 5m/15m | wick through a part 3 liquidity level (or the previous day's high/low), close back inside on that candle or within 3 candles. A later sweep only replaces it if it goes further |
-| 2 Shift | 5m body closes through the last opposing swing (CHoCH) with displacement | within 20 candles, a body close through the most recent small 3-candle swing on the other side; the candle body is at least 1 x ATR(14) or the move left an FVG |
-| 3 Zone | displacement FVG, order block (leg before the sweep), equilibrium of sweep-to-BOS swing | all three drawn; "Confluence n/3" counts how many overlap |
-| 4 1m trigger | 1m BOS or IFVG in the zone | **not built yet** |
-| 5 Entry | limit at the FVG edge or 50% | limit at the FVG 50%; equilibrium if there is no FVG |
-| 6 Stop | a few ticks beyond the sweep wick | 4 ticks beyond the sweep's extreme |
-| 7 Target | opposite liquidity pool, min 2R | first pool (part 3 level or previous day high/low) giving at least 2R; the next pool is the runner |
-| 8 Manage | BE / trail after a new BOS; out by 11 AM | **not built yet** |
+| M1 | Bias | last BOS/CHoCH (pivot 5, close beyond) on 4H and 1H both agree; both against = no setup; one = B |
+| M2 | Meaningful liquidity | ranked untouched pools: 1 PDH/PDL, 2 PWH/PWL, 3 Asia (18:00-00:00), London (02:00-05:00), NY premarket (05:00-09:30) high/low, 4 EQH/EQL (two pivots within 0.1 ATR), 5 4H/1H swing, 6 clean 15m swing. Wick through, close back inside within one 15-minute period |
+| M3 | Displacement | breaking candle body >= 1 x ATR or move from sweep >= 2 x ATR, AND a fair value gap in the move (middle candle at or after the sweep). No gap = NO TRADE |
+| M4 | CHoCH | body close through the 3-candle swing that started the leg into the sweep, within 12 candles |
+| M5 | Zone | the displacement gap |
+| M6 | Retrace | price must come back into the gap; target first = "Missed: no retrace"; close beyond the sweep = dead; 30 candles = expired |
+| M7 | 1m confirmation | reads 1-minute candles: 1m BOS (close past a 1m 2-candle swing formed after the touch) or 1m iFVG |
+| M8 | Stop / target | 4 ticks beyond the sweep wick; first ranked untouched pool beyond giving >= 2R; checked again at the actual entry |
 
-The setup is dropped if a candle closes back beyond the swept extreme, if price reaches the target without
-retracing to the entry ("Missed: no retrace"), or if the entry does not fill within 30 candles.
+Grades: A+ = mandatory + 2 of (OB overlaps the gap, gap in discount/premium, PDL/PDH/PWL/PWH swept, daily agrees).
+A = mandatory. B = faded with the missing reason, no alerts (4H/1H don't both agree, stop wider than 3 x ATR).
+One setup at a time; a new one the other way cancels a waiting one (never one already in a trade).
+Bias table bottom right; ranked pools (ranks 1-4) drawn as dashed lines with names.
 
-Check on MNQ 5m, 17 Nov evening (your pink-line example): Sweep 27,609.25 (17:05, closed back inside on the
-15m), CHoCH at 27,433.5 (17:50 close below the 17:25 low), entry FVG 50% 27,474.25, stop 27,610.25,
-target 26,841.25 (4.7R). Not backtested.
+Not built: step 8 (trade management). Not backtested. Not yet checked on the chart (TradingView was not connected).

@@ -5,7 +5,7 @@
 //   Part 3: Swing points and liquidity    (own build of the idea in "Swing Points and Liquidity" by Leviathan)
 //   Part 4: Market structure: BOS / CHoCH (the user's "BOS & CHoCH" code), strong/weak high and low, premium/discount, previous D/W/M levels
 //           (own build of the structure ideas in LuxAlgo "Smart Money Concepts")
-//   THE SETUP: steps 1 to 7 of the trading plan (sweep, CHoCH with displacement, zone, entry, stop, target)
+//   THE SETUP: the TJR sequence, graded A+/A/B (bias, ranked sweep, displacement CHoCH, FVG zone, 1m trigger)
 //   Part 5: (next indicator goes here)
 // Setup signal (proposed, switchable):
 //   LONG  = trend is up (last shift bullish), a live bullish order block exists, and price comes back into a
@@ -1011,60 +1011,204 @@ if cbShow and (cbLong or cbShort)
 alertcondition(cbLong,  "Confirmed bullish BOS", "Sweep or order block, retrace into FVG/OB, then bullish BOS")
 alertcondition(cbShort, "Confirmed bearish BOS", "Sweep or order block, retrace into FVG/OB, then bearish BOS")
 
-// ═════════════════════════ THE SETUP (steps 1 to 7) ═════════════════════════
-// Draws the whole trade idea on the chart so it is easy to find (bullish; bearish is the mirror):
-//   1. SWEEP: price runs through a marked liquidity level (part 3 swing low, or the previous day's low) and
-//      CLOSES BACK INSIDE (above the level) on that candle or within the next 3 candles (a 15m candle on 5m).
-//   2. SHIFT: within `suShiftWin` candles a candle BODY closes above the last opposing swing high (the most
-//      recent small 3-candle swing high at that moment): a CHoCH. A later sweep only replaces the first if it
-//      goes further, so the stop always sits beyond the true extreme. It needs displacement: the shift candle's
-//      body is at least `suDisp` x ATR(14), or the move left a bullish fair value gap.
-//   3. ZONE: the FVG left by the displacement, the order block (the red candles into the sweep low) and the
-//      equilibrium (50% of the move from the sweep low to the shift high). Confluence = how many overlap.
-//   5. ENTRY: limit at the middle (50%, consequent encroachment) of that FVG; at equilibrium if there is none.
-//   6. STOP: a few ticks beyond the sweep's extreme wick.
-//   7. TARGET: the next liquidity pool on the other side (part 3 swing high or previous day's high) that gives
-//      at least `suMinR`; the pool after it is the runner target.
-// Not built yet: step 4 (the 1-minute trigger) and step 8 (managing the trade). No time-of-day filter.
-// The setup dies if a candle closes back beyond the swept extreme, if price reaches the target without
-// coming back to the entry ("no chasing"), or if the entry is not reached within `suFillWin` candles.
-gSU = "THE SETUP (sweep, shift, zone, entry)"
+// ═════════════════════════ THE SETUP: TJR sequence, graded ═════════════════════════
+// Rebuilt 26 Nov 2026 to the user's rulebook (research/NOTE_the_setup.md). A setup is only drawn when the steps
+// happen IN ORDER. Bullish described; bearish is the mirror.
+// MANDATORY (all needed for an A):
+//   M1 Bias: the last BOS/CHoCH on 4H and on 1H are both bullish.
+//   M2 Meaningful liquidity swept: a ranked, untouched pool (PDL, PWL, Asia/London/premarket low, EQL, 1H/4H or
+//      15m swing low). The wick goes through and price closes back above within one 15-minute period.
+//   M3 Displacement right after the sweep: the move from the sweep low to the break is strong (breaking candle
+//      body >= `suDisp` x ATR, or the move >= 2 x ATR) AND it leaves a bullish fair value gap.
+//   M4 CHoCH of the relevant swing: a body close above the swing high that started the leg down into the sweep,
+//      within `suShiftWin` candles of the sweep.
+//   M5 Zone = the fair value gap left by that displacement.
+//   M6 Price retraces into the zone without closing below the sweep low; no chasing (target first = gone).
+//   M7 1-minute confirmation inside the zone: a 1m BOS up, or a 1m iFVG (close up through a 1m bearish gap).
+//   M8 Stop a few ticks under the sweep wick; first target = nearest ranked pool above giving >= `suMinR`.
+// GRADES: A+ = all mandatory + 2 of (order block overlaps the gap, gap in the discount half, PDL/PWL swept,
+//   daily bias agrees). A = all mandatory. B = drawn faded with the reason, no alerts (4H/1H disagree, or very wide
+//   stop). Not drawn (NO TRADE): 4H and 1H both against, no displacement gap, no target with enough R.
+// One setup at a time: a new setup the other way cancels a waiting one. No time-of-day filter.
+gSU = "THE SETUP (TJR sequence)"
 suShow     = input.bool(true, "Show setups", group = gSU)
-suShiftWin = input.int(20, "Shift must come within, candles after the sweep", minval = 1, maxval = 200, group = gSU)
-suDisp     = input.float(1.0, "Displacement: shift candle body, x ATR(14)", minval = 0, step = 0.1, group = gSU,
-     tooltip = "The shift counts as displacement if the breaking candle's body is at least this many ATRs, OR the move left a fair value gap.")
+suShowB    = input.bool(true, "Show B setups (faded)", group = gSU)
+suShiftWin = input.int(12, "CHoCH must come within, candles after the sweep", minval = 1, maxval = 100, group = gSU)
+suDisp     = input.float(1.0, "Displacement: breaking candle body, x ATR(14)", minval = 0, step = 0.1, group = gSU)
 suTicks    = input.int(4, "Stop: ticks beyond the sweep wick", minval = 0, maxval = 100, group = gSU)
-suMinR     = input.float(2.0, "Minimum reward to risk for the target", minval = 0.5, step = 0.5, group = gSU)
-suFillWin  = input.int(30, "Entry must fill within, candles after the shift", minval = 1, maxval = 300, group = gSU)
-suKeep     = input.int(5, "Setups kept on the chart", minval = 1, maxval = 30, group = gSU)
+suMinR     = input.float(2.0, "Minimum reward to risk", minval = 0.5, step = 0.5, group = gSU)
+suMaxStop  = input.float(3.0, "Stop wider than this x ATR(14) = warning (B)", minval = 0.5, step = 0.5, group = gSU)
+suFillWin  = input.int(30, "Entry must confirm within, candles after the CHoCH", minval = 1, maxval = 300, group = gSU)
+suKeep     = input.int(4, "Setups kept on the chart", minval = 1, maxval = 30, group = gSU)
+suShowPools = input.bool(true, "Show ranked liquidity pools", group = gSU)
+suShowBias  = input.bool(true, "Show bias table", group = gSU)
 suBullCol  = input.color(#00897b, "Long setup", group = gSU)
 suBearCol  = input.color(#d32f2f, "Short setup", group = gSU)
+suSessAsia = input.session("1800-2359", "Asia session (New York time)", group = gSU)
+suSessLon  = input.session("0200-0500", "London session (New York time)", group = gSU)
+suSessPre  = input.session("0500-0930", "NY premarket (New York time)", group = gSU)
 
-type Setup
-    int   dir
-    int   stage      // 0 idle, 1 swept (waiting for the shift), 2 shifted (waiting for the entry), 3 in the trade
-    int   sweepIdx
-    int   sweepT
-    float ext        // the sweep's extreme wick
-    float ref        // last opposing swing (the level the CHoCH must close through)
-    int   refT
-    int   refIdx
-    float legExt     // furthest price of the move away from the sweep (for equilibrium)
-    float obTop
-    float obBot
-    int   obT
-    float fvgTop
-    float fvgBot
-    int   shiftIdx
-    float entry
-    float stop
-    float t1
-    float t2
-    line  entryLn
-    label entryLb
+// ── M1: higher-timeframe bias = direction of the last BOS/CHoCH (pivot 5, close beyond) on that timeframe ──
+htfTrend(int len) =>
+    var float sh = na
+    var float sl = na
+    var int tr = 0
+    xph = ta.pivothigh(high, len, len)
+    xpl = ta.pivotlow(low, len, len)
+    if not na(xph)
+        sh := xph
+    if not na(xpl)
+        sl := xpl
+    if not na(sh) and close > sh
+        tr := 1
+        sh := na
+    if not na(sl) and close < sl
+        tr := -1
+        sl := na
+    tr
+bias4h = request.security(syminfo.tickerid, "240", htfTrend(5)[1], lookahead = barmerge.lookahead_on)
+bias1h = request.security(syminfo.tickerid, "60", htfTrend(5)[1], lookahead = barmerge.lookahead_on)
+biasD  = request.security(syminfo.tickerid, "D", htfTrend(5)[1], lookahead = barmerge.lookahead_on)
 
-var suL = Setup.new(1, 0)
-var suS = Setup.new(-1, 0)
+// ── M2: ranked liquidity pools ──
+// last finished session high/low
+sessHL(string sess) =>
+    inS = not na(time(timeframe.period, sess, "America/New_York"))
+    var float hiCur = na
+    var float loCur = na
+    var float hiDone = na
+    var float loDone = na
+    if inS and not inS[1]
+        hiCur := high
+        loCur := low
+    else if inS
+        hiCur := math.max(hiCur, high)
+        loCur := math.min(loCur, low)
+    if not inS and inS[1]
+        hiDone := hiCur
+        loDone := loCur
+    [hiDone, loDone]
+[asiaH, asiaL] = sessHL(suSessAsia)
+[lonH, lonL]   = sessHL(suSessLon)
+[preH, preL]   = sessHL(suSessPre)
+// last confirmed swing high/low on a higher timeframe
+htfSwing(int len) =>
+    xph = ta.pivothigh(high, len, len)
+    xpl = ta.pivotlow(low, len, len)
+    vh = ta.valuewhen(not na(xph), xph, 0)
+    vl = ta.valuewhen(not na(xpl), xpl, 0)
+    [vh[1], vl[1]]
+[h1H, h1L]   = request.security(syminfo.tickerid, "60", htfSwing(3), lookahead = barmerge.lookahead_on)
+[h4H, h4L]   = request.security(syminfo.tickerid, "240", htfSwing(3), lookahead = barmerge.lookahead_on)
+[m15H, m15L] = request.security(syminfo.tickerid, "15", htfSwing(5), lookahead = barmerge.lookahead_on)
+// equal highs / lows from the part 4 pivots: two pivots within 0.1 x ATR
+var float eqH = na
+var float eqL = na
+if not na(bcPh) and not na(iHi.last) and math.abs(iHi.level - iHi.last) <= 0.1 * obAtr
+    eqH := math.max(iHi.level, iHi.last)
+if not na(bcPl) and not na(iLo.last) and math.abs(iLo.level - iLo.last) <= 0.1 * obAtr
+    eqL := math.min(iLo.level, iLo.last)
+
+// pool slots: the source of each level, its rank (1 = most important), its side (+1 above = buy stops, -1 below)
+var plName = array.from("PDH", "PDL", "PWH", "PWL", "Asia H", "Asia L", "London H", "London L", "Premkt H", "Premkt L", "EQH", "EQL", "4H swing H", "4H swing L", "1H swing H", "1H swing L", "15m swing H", "15m swing L")
+var plRank = array.from(1, 1, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 5, 5, 5, 5, 6, 6)
+var plDir  = array.from(1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1)
+var plLvl   = array.new<float>(18, na)
+var plTaken = array.new<bool>(18, true)
+var plPend  = array.new<int>(18, na)
+var plPExt  = array.new<float>(18, na)
+srcVals = array.from(pdH, pdL, pwH, pwL, asiaH, asiaL, lonH, lonL, preH, preL, eqH, eqL, h4H, h4L, h1H, h1L, m15H, m15L)
+pendWin = math.max(1, int(900 / timeframe.in_seconds()))   // close back inside within one 15-minute period
+
+// this candle's best sweep per side (lowest rank number wins)
+swLongRank = 99
+swLongName = ""
+float swLongExt = na
+swShortRank = 99
+swShortName = ""
+float swShortExt = na
+
+if barstate.isconfirmed
+    for i = 0 to 17
+        v = srcVals.get(i)
+        d = plDir.get(i)
+        // a new level from its source: untouched unless price is already beyond it
+        if not na(v) and v != plLvl.get(i)
+            plLvl.set(i, v)
+            plTaken.set(i, d == 1 ? high > v : low < v)
+            plPend.set(i, na)
+        lv = plLvl.get(i)
+        if not na(lv)
+            swept = false
+            float ext = na
+            if not plTaken.get(i)
+                through = d == 1 ? high > lv : low < lv
+                if through
+                    plTaken.set(i, true)
+                    if d == 1 ? close < lv : close > lv
+                        swept := true
+                        ext := d == 1 ? high : low
+                    else
+                        plPend.set(i, bar_index)
+                        plPExt.set(i, d == 1 ? high : low)
+            else if not na(plPend.get(i)) and bar_index > plPend.get(i)
+                plPExt.set(i, d == 1 ? math.max(plPExt.get(i), high) : math.min(plPExt.get(i), low))
+                if d == 1 ? close < lv : close > lv
+                    swept := true
+                    ext := plPExt.get(i)
+                    plPend.set(i, na)
+                else if bar_index - plPend.get(i) >= pendWin
+                    plPend.set(i, na)
+            if swept
+                r = plRank.get(i)
+                if d == -1 and (r < swLongRank or (r == swLongRank and ext < swLongExt))
+                    swLongRank := r
+                    swLongName := plName.get(i)
+                    swLongExt := ext
+                if d == 1 and (r < swShortRank or (r == swShortRank and ext > swShortExt))
+                    swShortRank := r
+                    swShortName := plName.get(i)
+                    swShortExt := ext
+
+// ── M3/M4: candidate after a sweep, waiting for displacement + CHoCH ──
+type SuCand
+    int    dir
+    bool   on = false
+    int    sweepIdx
+    int    sweepT
+    float  ext
+    string name
+    int    rank
+    float  ref
+    int    refIdx
+    float  legExt
+    float  obTop
+    float  obBot
+    int    obT
+    float  fvgTop
+    float  fvgBot
+    int    fvgT
+    int    brokeIdx
+    bool   bigBody
+
+// ── the one active setup ──
+type SuTrade
+    int    dir
+    int    stage = 0     // 0 none, 2 waiting for the retrace, 3 in the zone (waiting for 1m), 4 in the trade
+    string grade
+    float  ext
+    float  fvgTop
+    float  fvgBot
+    float  stop
+    float  t1
+    float  t2
+    float  entry
+    int    shiftIdx
+    bool   touched = false
+
+var cL = SuCand.new(1)
+var cS = SuCand.new(-1)
+var tr = SuTrade.new(0)
 var suLines  = array.new<line>()
 var suLabels = array.new<label>()
 var suBoxes  = array.new<box>()
@@ -1074,73 +1218,80 @@ suEvFillL  = false
 suEvFillS  = false
 
 suTrim() =>
-    while suLines.size() > suKeep * 8
+    while suLines.size() > suKeep * 7
         line.delete(suLines.shift())
-    while suLabels.size() > suKeep * 8
+    while suLabels.size() > suKeep * 6
         label.delete(suLabels.shift())
     while suBoxes.size() > suKeep * 2
         box.delete(suBoxes.shift())
 
-suLabel(int x, float y, string txt, color col, bool below) =>
+suNote(int x, float y, string txt, color col, bool below) =>
     if suShow
         suLabels.push(label.new(x, y, txt, color = color(na), textcolor = col, size = size.small,
              style = below ? label.style_label_up : label.style_label_down))
         suTrim()
 
-// start (or restart) a setup on a sweep
-// a later sweep only replaces a waiting one if it goes further (a deeper low / higher high)
-suStart(Setup s, float extreme) =>
-    further = s.stage == 1 and (s.dir == 1 ? extreme < s.ext : extreme > s.ext)
-    if s.stage == 0 or further
-        s.stage    := 1
-        s.sweepIdx := bar_index
-        s.sweepT   := time
-        s.ext      := extreme
-        s.legExt   := s.dir == 1 ? high : low
-        // order block: the leg before the sweep = opposing candles into the sweep extreme (this candle included)
-        float t = na
-        float b = na
-        int   first = 0
-        for k = 0 to maxLeg - 1
-            opp = s.dir == 1 ? close[k] < open[k] : close[k] > open[k]
-            if not opp and k > 0
+suStartCand(SuCand c, float extreme, string name, int rank) =>
+    deeper = c.on and (c.dir == 1 ? extreme < c.ext : extreme > c.ext)
+    if not c.on or deeper or rank < c.rank
+        isL = c.dir == 1
+        // the swing that started the leg into the sweep: nearest 3-candle swing high (long) / low (short)
+        float ref = na
+        int refIdx = na
+        for k = 3 to 80
+            isSw = true
+            for j = 1 to 3
+                if isL ? (high[k - j] > high[k] or high[k + j] >= high[k]) : (low[k - j] < low[k] or low[k + j] <= low[k])
+                    isSw := false
+                    break
+            if isSw
+                ref := isL ? high[k] : low[k]
+                refIdx := bar_index - k
                 break
-            if opp or k == 0
+        if not na(ref) and (isL ? ref > close : ref < close)
+            c.on := true
+            c.sweepIdx := bar_index
+            c.sweepT := time
+            c.ext := extreme
+            c.name := name
+            c.rank := rank
+            c.ref := ref
+            c.refIdx := refIdx
+            c.legExt := isL ? high : low
+            c.fvgTop := na
+            c.fvgBot := na
+            c.brokeIdx := na
+            // order block: the opposing candles into the sweep extreme
+            float t = na
+            float b = na
+            int first = 0
+            for k = 0 to maxLeg - 1
+                opp = isL ? close[k] < open[k] : close[k] > open[k]
+                if not opp and k > 0
+                    break
                 t := na(t) ? high[k] : math.max(t, high[k])
                 b := na(b) ? low[k] : math.min(b, low[k])
                 first := k
-        s.obTop := t
-        s.obBot := b
-        s.obT   := time[first]
+            c.obTop := t
+            c.obBot := b
+            c.obT := time[first]
 
-// newest live FVG in the setup's direction that formed at or after the sweep
-suFvg(Setup s) =>
-    float ft = na
-    float fb = na
-    for z in zones
-        if z.dir == s.dir and not z.inverted and z.state != "FILLED" and box.get_left(z.bx) >= s.sweepT
-            ft := z.top
-            fb := z.bot
-    [ft, fb]
-
-// nearest liquidity pools beyond the entry on the target side (part 3 levels and the previous day's high/low)
-suTargets(Setup s) =>
-    risk = math.abs(s.entry - s.stop)
+// nearest ranked pools beyond `fromPx` on the target side
+suTargets(int dir, float fromPx, float entry, float stop) =>
+    risk = math.abs(entry - stop)
     pools = array.new<float>()
-    for q in liqs
-        if q.dir == s.dir and (s.dir == 1 ? q.level > high : q.level < low)
-            pools.push(q.level)
-    pd = s.dir == 1 ? pdH : pdL
-    if not na(pd) and (s.dir == 1 ? pd > high : pd < low)
-        pools.push(pd)
-    if s.dir == 1
+    for i = 0 to 17
+        lv = plLvl.get(i)
+        if plDir.get(i) == dir and not plTaken.get(i) and not na(lv) and (dir == 1 ? lv > fromPx : lv < fromPx)
+            pools.push(lv)
+    if dir == 1
         pools.sort(order.ascending)
     else
         pools.sort(order.descending)
     float x1 = na
     float x2 = na
     for p in pools
-        r = risk > 0 ? math.abs(p - s.entry) / risk : 0
+        r = risk > 0 ? math.abs(p - entry) / risk : 0
         if na(x1)
             if r >= suMinR
                 x1 := p
@@ -1148,144 +1299,256 @@ suTargets(Setup s) =>
             x2 := p
     [x1, x2]
 
-suRiskTxt(Setup s, float tgt) =>
-    str.tostring(math.abs(tgt - s.entry) / math.abs(s.entry - s.stop), "#.0") + "R"
+rTxt(float tgt, float entry, float stop) =>
+    str.tostring(math.abs(tgt - entry) / math.abs(entry - stop), "#.0") + "R"
 
-// one bar of work for a setup
-suStep(Setup s, bool swept, float extreme) =>
-    evSet  = false
-    evFill = false
-    col = s.dir == 1 ? suBullCol : suBearCol
-    isL = s.dir == 1
-    // stage 3: in the trade
-    if s.stage == 3
-        hitStop = isL ? low <= s.stop : high >= s.stop
-        hitTgt  = isL ? high >= s.t1 : low <= s.t1
-        if hitStop
-            suLabel(bar_index, s.stop, "Stop  -1R", col, isL)
-            s.stage := 0
-        else if hitTgt
-            suLabel(bar_index, s.t1, "Target  +" + suRiskTxt(s, s.t1), col, not isL)
-            s.stage := 0
-    // stage 2: waiting for the retrace into the zone
-    else if s.stage == 2
-        if bar_index - s.shiftIdx <= 2 and na(s.fvgTop)
-            [ft, fb] = suFvg(s)
-            if not na(ft)
-                s.fvgTop := ft
-                s.fvgBot := fb
-                s.entry  := (ft + fb) / 2
-                line.set_y1(s.entryLn, s.entry)
-                line.set_y2(s.entryLn, s.entry)
-                label.set_y(s.entryLb, s.entry)
-                label.set_text(s.entryLb, "Entry (FVG 50%)")
-        dead   = isL ? close < s.ext : close > s.ext
-        filled = isL ? low <= s.entry : high >= s.entry
-        ran    = not na(s.t1) and (isL ? high >= s.t1 : low <= s.t1)
-        if dead
-            suLabel(bar_index, close, "Setup dead", color.gray, not isL)
-            s.stage := 0
-        else if filled
-            s.stage := 3
-            suLabel(bar_index, s.entry, "Entry", col, isL)
-            evFill := true
-            // a fill and a stop on the same candle count as a loss
-            if isL ? low <= s.stop : high >= s.stop
-                suLabel(bar_index, s.stop, "Stop  -1R", col, isL)
-                s.stage := 0
-        else if ran
-            suLabel(bar_index, s.t1, "Missed: no retrace", color.gray, not isL)
-            s.stage := 0
-        else if bar_index - s.shiftIdx > suFillWin
-            s.stage := 0
-    // stage 1: swept, waiting for the shift
-    else if s.stage == 1
-        if isL ? close < s.ext : close > s.ext
-            s.stage := 0
+// one bar of work for a candidate; returns true when a setup was created
+suCandStep(SuCand c) =>
+    made = false
+    if c.on
+        isL = c.dir == 1
+        col = isL ? suBullCol : suBearCol
+        if isL ? close < c.ext : close > c.ext
+            c.on := false
         else
-            if isL ? low < s.ext : high > s.ext
-                s.ext := isL ? low : high
-            s.legExt := isL ? math.max(s.legExt, high) : math.min(s.legExt, low)
-            // the CHoCH: a candle body closes through the most recent small swing on the other side (part 4)
-            broke = isL ? (evIBos == 1 or evIChoch == 1) : (evIBos == -1 or evIChoch == -1)
-            if broke
-                s.ref    := isL ? iHi.level : iLo.level
-                s.refT   := isL ? iHi.t : iLo.t
-                s.refIdx := isL ? iHi.idx : iLo.idx
-            if bar_index - s.sweepIdx > suShiftWin
-                s.stage := 0
-            else if broke and bar_index > s.sweepIdx
-                [fA, fB] = suFvg(s)
-                ft = fA
-                fb = fB
-                disp = math.abs(close - open) >= suDisp * obAtr or not na(ft)
-                if disp
-                    s.stage    := 2
-                    s.shiftIdx := bar_index
-                    s.fvgTop   := ft
-                    s.fvgBot   := fb
-                    eq = (s.ext + s.legExt) / 2
-                    s.stop  := isL ? s.ext - suTicks * syminfo.mintick : s.ext + suTicks * syminfo.mintick
-                    s.entry := na(ft) ? eq : (ft + fb) / 2
-                    [x1, x2] = suTargets(s)
-                    s.t1 := x1
-                    s.t2 := x2
-                    // confluence: FVG, order block overlapping the entry area, equilibrium inside it
-                    zt = na(ft) ? eq : ft
-                    zb = na(ft) ? eq : fb
-                    conf = (na(ft) ? 0 : 1) + (s.obTop >= zb and s.obBot <= zt ? 1 : 0) + (eq <= zt and eq >= zb ? 1 : (eq <= s.obTop and eq >= s.obBot ? 1 : 0))
-                    evSet := true
-                    if suShow
-                        rightT = time + 30 * (time - time[1])
-                        suLabels.push(label.new(s.sweepT, s.ext, "Sweep", xloc = xloc.bar_time, color = color(na),
-                             textcolor = col, size = size.small, style = isL ? label.style_label_up : label.style_label_down))
-                        suLines.push(line.new(s.refT, s.ref, time, s.ref, xloc = xloc.bar_time, color = col, width = 2))
-                        suLabels.push(label.new(math.round((s.refIdx + bar_index) / 2), s.ref, "CHoCH", color = col,
-                             textcolor = color.white, size = size.small, style = isL ? label.style_label_down : label.style_label_up))
-                        suBoxes.push(box.new(s.obT, s.obTop, rightT, s.obBot, xloc = xloc.bar_time, border_color = color.new(col, 40),
-                             bgcolor = color.new(col, 88), text = "OB", text_size = size.tiny, text_color = col, text_halign = text.align_left))
-                        suLines.push(line.new(s.sweepT, eq, rightT, eq, xloc = xloc.bar_time, color = color.new(col, 30), style = line.style_dotted))
-                        s.entryLn := line.new(time, s.entry, rightT, s.entry, xloc = xloc.bar_time, color = col, width = 2)
-                        s.entryLb := label.new(rightT, s.entry, na(ft) ? "Entry (EQ 50%)" : "Entry (FVG 50%)", xloc = xloc.bar_time,
-                             style = label.style_label_left, color = color(na), textcolor = col, size = size.small)
-                        suLines.push(s.entryLn)
-                        suLabels.push(s.entryLb)
-                        suLines.push(line.new(time, s.stop, rightT, s.stop, xloc = xloc.bar_time, color = color.gray, width = 2))
-                        suLabels.push(label.new(rightT, s.stop, "Stop", xloc = xloc.bar_time, style = label.style_label_left,
-                             color = color(na), textcolor = color.gray, size = size.small))
-                        if not na(x1)
-                            suLines.push(line.new(time, x1, rightT, x1, xloc = xloc.bar_time, color = col, style = line.style_dashed))
-                            suLabels.push(label.new(rightT, x1, "Target " + suRiskTxt(s, x1), xloc = xloc.bar_time,
-                                 style = label.style_label_left, color = color(na), textcolor = col, size = size.small))
-                        if not na(x2)
-                            suLines.push(line.new(time, x2, rightT, x2, xloc = xloc.bar_time, color = col, style = line.style_dotted))
-                            suLabels.push(label.new(rightT, x2, "Runner " + suRiskTxt(s, x2), xloc = xloc.bar_time,
-                                 style = label.style_label_left, color = color(na), textcolor = col, size = size.small))
-                        suLabels.push(label.new(math.round((s.refIdx + bar_index) / 2), s.ref, "Confluence " + str.tostring(conf) + "/3",
-                             color = color(na), textcolor = col, size = size.tiny, style = isL ? label.style_label_up : label.style_label_down))
-                        suTrim()
-                    if na(x1)
-                        suLabel(bar_index, close, "No " + str.tostring(suMinR) + "R target: skip", color.gray, not isL)
-                        s.stage := 0
-    // a new sweep (re)starts an idle or waiting setup
-    if swept
-        suStart(s, extreme)
-    [evSet, evFill]
+            c.legExt := isL ? math.max(c.legExt, high) : math.min(c.legExt, low)
+            // a fair value gap in the move away from the sweep (its middle candle at or after the sweep candle)
+            if bar_index - 1 >= c.sweepIdx and (isL ? low > high[2] : high < low[2])
+                c.fvgTop := isL ? low : low[2]
+                c.fvgBot := isL ? high[2] : high
+                c.fvgT := time[2]
+            if na(c.brokeIdx)
+                if bar_index - c.sweepIdx > suShiftWin
+                    c.on := false
+                else if bar_index > c.sweepIdx and (isL ? close > c.ref : close < c.ref)
+                    c.brokeIdx := bar_index
+                    c.bigBody := math.abs(close - open) >= suDisp * obAtr or math.abs(close - c.ext) >= 2 * obAtr
+            // the CHoCH happened: the gap can be confirmed on the break candle or the one after it
+            if not na(c.brokeIdx) and c.on
+                if not na(c.fvgTop) and c.bigBody
+                    c.on := false
+                    // grading
+                    sb4 = isL ? bias4h : -bias4h
+                    sb1 = isL ? bias1h : -bias1h
+                    sbD = isL ? biasD : -biasD
+                    ce = (c.fvgTop + c.fvgBot) / 2
+                    stop = isL ? c.ext - suTicks * syminfo.mintick : c.ext + suTicks * syminfo.mintick
+                    [x1, x2] = suTargets(c.dir, isL ? c.legExt : c.legExt, ce, stop)
+                    if not (sb4 == -1 and sb1 == -1) and not na(x1)
+                        eq = (c.ext + c.legExt) / 2
+                        warn = ""
+                        if not (sb4 == 1 and sb1 == 1)
+                            warn := "4H/1H don't both agree"
+                        if math.abs(ce - stop) > suMaxStop * obAtr
+                            warn := warn == "" ? "wide stop" : warn + ", wide stop"
+                        obOv = c.obTop >= c.fvgBot and c.obBot <= c.fvgTop
+                        disc = isL ? ce <= eq : ce >= eq
+                        top = c.rank <= 2
+                        dAg = sbD == 1
+                        plus = (obOv ? 1 : 0) + (disc ? 1 : 0) + (top ? 1 : 0) + (dAg ? 1 : 0)
+                        grade = warn != "" ? "B" : plus >= 2 ? "A+" : "A"
+                        if grade != "B" or suShowB
+                            // one setup at a time: replace a waiting setup (never one that is already in a trade)
+                            if tr.stage == 4
+                                na
+                            else
+                                if tr.stage >= 2 and tr.dir != c.dir
+                                    suNote(bar_index, close, "previous setup cancelled", color.gray, not isL)
+                                tr.dir := c.dir
+                                tr.stage := 2
+                                tr.grade := grade
+                                tr.ext := c.ext
+                                tr.fvgTop := c.fvgTop
+                                tr.fvgBot := c.fvgBot
+                                tr.stop := stop
+                                tr.t1 := x1
+                                tr.t2 := x2
+                                tr.shiftIdx := bar_index
+                                tr.touched := false
+                                made := grade != "B"
+                                if suShow
+                                    fc = grade == "B" ? color.new(col, 65) : col
+                                    rightT = time + 25 * (time - time[1])
+                                    why = c.name + " sweep" + (sb4 == 1 and sb1 == 1 ? " · 4H/1H " + (isL ? "bull" : "bear") : "") + (obOv ? " · OB+FVG" : "") + (disc ? (isL ? " · discount" : " · premium") : "") + (dAg ? " · daily agrees" : "")
+                                    head = grade + (isL ? " LONG" : " SHORT")
+                                    txt = grade == "B" ? head + " (no alerts)\nmissing: " + warn : head + "\n" + why + "\nwait: retrace + 1m confirm"
+                                    suLabels.push(label.new(c.sweepT, c.ext, "Sweep " + c.name, xloc = xloc.bar_time, color = color(na),
+                                         textcolor = fc, size = size.small, style = isL ? label.style_label_up : label.style_label_down))
+                                    suLines.push(line.new(c.refIdx, c.ref, c.brokeIdx, c.ref, color = fc, width = 2))
+                                    suLabels.push(label.new(math.round((c.refIdx + c.brokeIdx) / 2), c.ref, "CHoCH", color = fc,
+                                         textcolor = color.white, size = size.small, style = isL ? label.style_label_down : label.style_label_up))
+                                    suBoxes.push(box.new(c.fvgT, c.fvgTop, rightT, c.fvgBot, xloc = xloc.bar_time, border_color = fc,
+                                         bgcolor = color.new(col, grade == "B" ? 92 : 80), text = "entry zone (displacement FVG)", text_size = size.tiny,
+                                         text_color = fc, text_halign = text.align_left))
+                                    suBoxes.push(box.new(c.obT, c.obTop, rightT, c.obBot, xloc = xloc.bar_time, border_color = color.new(col, 75),
+                                         bgcolor = color.new(col, 94), text = "OB", text_size = size.tiny, text_color = fc, text_halign = text.align_left))
+                                    suLines.push(line.new(c.sweepT, eq, rightT, eq, xloc = xloc.bar_time, color = color.new(col, 50), style = line.style_dotted))
+                                    suLines.push(line.new(time, stop, rightT, stop, xloc = xloc.bar_time, color = color.gray, width = 2))
+                                    suLabels.push(label.new(rightT, stop, "Stop", xloc = xloc.bar_time, style = label.style_label_left,
+                                         color = color(na), textcolor = color.gray, size = size.small))
+                                    suLines.push(line.new(time, x1, rightT, x1, xloc = xloc.bar_time, color = fc, style = line.style_dashed))
+                                    suLabels.push(label.new(rightT, x1, "Target ~" + rTxt(x1, ce, stop), xloc = xloc.bar_time,
+                                         style = label.style_label_left, color = color(na), textcolor = fc, size = size.small))
+                                    if not na(x2)
+                                        suLines.push(line.new(time, x2, rightT, x2, xloc = xloc.bar_time, color = fc, style = line.style_dotted))
+                                    suLabels.push(label.new(bar_index, isL ? high : low, txt, color = grade == "B" ? color.new(col, 80) : col,
+                                         textcolor = color.white, size = size.small, style = isL ? label.style_label_down : label.style_label_up))
+                                    suTrim()
+                else if bar_index - c.brokeIdx >= 1
+                    // a break without a displacement gap is not a TJR shift: NO TRADE
+                    c.on := false
+    made
 
+// ── M7: 1-minute candles inside the current chart candle ──
+[m1h, m1l, m1c] = request.security_lower_tf(syminfo.tickerid, "1", [high, low, close])
+var b1h = array.new<float>()
+var b1l = array.new<float>()
+var float m1SwH = na
+var float m1SwL = na
+var float m1BearGapTop = na   // last 1m bearish gap (its top); a close above it = bullish iFVG
+var float m1BullGapBot = na   // last 1m bullish gap (its bottom); a close below it = bearish iFVG
+trigPx = 0.0
+trigTxt = ""
+trigHit = false
+dead1m = false
+if barstate.isconfirmed and m1c.size() > 0
+    for j = 0 to m1c.size() - 1
+        hj = m1h.get(j)
+        lj = m1l.get(j)
+        cj = m1c.get(j)
+        b1h.push(hj)
+        b1l.push(lj)
+        if b1h.size() > 5
+            b1h.shift()
+            b1l.shift()
+        n = b1h.size()
+        if n == 5
+            if b1h.get(2) > math.max(b1h.get(0), b1h.get(1), b1h.get(3), b1h.get(4))
+                m1SwH := b1h.get(2)
+            if b1l.get(2) < math.min(b1l.get(0), b1l.get(1), b1l.get(3), b1l.get(4))
+                m1SwL := b1l.get(2)
+        if n >= 3
+            if b1h.get(n - 1) < b1l.get(n - 3)
+                m1BearGapTop := b1l.get(n - 3)
+            if b1l.get(n - 1) > b1h.get(n - 3)
+                m1BullGapBot := b1h.get(n - 3)
+        // the waiting setup: touch the zone, then wait for the 1m trigger
+        if tr.stage >= 2 and tr.stage <= 3 and not trigHit and not dead1m
+            isL = tr.dir == 1
+            if isL ? cj < tr.ext : cj > tr.ext
+                dead1m := true
+            else
+                if not tr.touched and (isL ? lj <= tr.fvgTop : hj >= tr.fvgBot)
+                    tr.touched := true
+                    tr.stage := 3
+                    // only 1m structure formed after the touch counts
+                    m1SwH := isL ? na : m1SwH
+                    m1SwL := isL ? m1SwL : na
+                    m1BearGapTop := isL ? na : m1BearGapTop
+                    m1BullGapBot := isL ? m1BullGapBot : na
+                else if tr.touched
+                    if isL and not na(m1SwH) and cj > m1SwH
+                        trigHit := true
+                        trigPx := cj
+                        trigTxt := "1m BOS"
+                    else if isL and not na(m1BearGapTop) and cj > m1BearGapTop
+                        trigHit := true
+                        trigPx := cj
+                        trigTxt := "1m iFVG"
+                    else if not isL and not na(m1SwL) and cj < m1SwL
+                        trigHit := true
+                        trigPx := cj
+                        trigTxt := "1m BOS"
+                    else if not isL and not na(m1BullGapBot) and cj < m1BullGapBot
+                        trigHit := true
+                        trigPx := cj
+                        trigTxt := "1m iFVG"
+
+// ── the active setup, bar by bar ──
+if barstate.isconfirmed and tr.stage > 0
+    isL = tr.dir == 1
+    col = isL ? suBullCol : suBearCol
+    fc = tr.grade == "B" ? color.new(col, 65) : col
+    if tr.stage == 4
+        hitStop = isL ? low <= tr.stop : high >= tr.stop
+        hitTgt  = isL ? high >= tr.t1 : low <= tr.t1
+        if hitStop
+            suNote(bar_index, tr.stop, "Stop  -1R", fc, isL)
+            tr.stage := 0
+        else if hitTgt
+            suNote(bar_index, tr.t1, "Target  +" + rTxt(tr.t1, tr.entry, tr.stop), fc, not isL)
+            tr.stage := 0
+    else
+        if dead1m or (isL ? close < tr.ext : close > tr.ext)
+            suNote(bar_index, close, "Setup dead (back beyond the sweep)", color.gray, not isL)
+            tr.stage := 0
+        else if trigHit
+            rr = math.abs(tr.t1 - trigPx) / math.abs(trigPx - tr.stop)
+            if rr < suMinR
+                suNote(bar_index, trigPx, "Skip: only " + str.tostring(rr, "#.0") + "R at entry", color.gray, isL)
+                tr.stage := 0
+            else
+                tr.entry := trigPx
+                tr.stage := 4
+                suNote(bar_index, trigPx, (isL ? "ENTRY ▲ " : "ENTRY ▼ ") + trigTxt + "  " + str.tostring(rr, "#.0") + "R", fc, isL)
+                if tr.grade != "B"
+                    if isL
+                        suEvFillL := true
+                    else
+                        suEvFillS := true
+        else if not tr.touched and (isL ? high >= tr.t1 : low <= tr.t1)
+            suNote(bar_index, tr.t1, "Missed: no retrace", color.gray, not isL)
+            tr.stage := 0
+        else if bar_index - tr.shiftIdx > suFillWin
+            suNote(bar_index, close, "Expired: no 1m confirmation", color.gray, not isL)
+            tr.stage := 0
+
+// ── candidates: run the waiting ones, then start new ones from this candle's sweeps ──
 if barstate.isconfirmed
-    pdSweepLo = not na(pdL) and low < pdL and close > pdL
-    pdSweepHi = not na(pdH) and high > pdH and close < pdH
-    [setL, fillL] = suStep(suL, swpLoNow or pdSweepLo, swpLoNow ? swpLoExt : low)
-    [setS, fillS] = suStep(suS, swpHiNow or pdSweepHi, swpHiNow ? swpHiExt : high)
-    suEvSetupL := setL
-    suEvFillL  := fillL
-    suEvSetupS := setS
-    suEvFillS  := fillS
+    suEvSetupL := suCandStep(cL)
+    suEvSetupS := suCandStep(cS)
+    if swLongRank < 99
+        suStartCand(cL, swLongExt, swLongName, swLongRank)
+    if swShortRank < 99
+        suStartCand(cS, swShortExt, swShortName, swShortRank)
 
-alertcondition(suEvSetupL, "SETUP long", "Sweep + CHoCH with displacement: long setup drawn, wait for the retrace to the entry")
-alertcondition(suEvSetupS, "SETUP short", "Sweep + CHoCH with displacement: short setup drawn, wait for the retrace to the entry")
-alertcondition(suEvFillL,  "SETUP long entry", "Price retraced to the long entry")
-alertcondition(suEvFillS,  "SETUP short entry", "Price retraced to the short entry")
+// ── ranked pools and bias table on the last candle ──
+arrow(int b) => b == 1 ? "▲" : b == -1 ? "▼" : "–"
+bcol(int b) => b == 1 ? suBullCol : b == -1 ? suBearCol : color.gray
+var poolLines  = array.new<line>()
+var poolLabels = array.new<label>()
+var table biasTb = table.new(position.bottom_right, 4, 2, bgcolor = color.new(chart.bg_color, 10), border_width = 1)
+if barstate.islast
+    for l in poolLines
+        line.delete(l)
+    for l in poolLabels
+        label.delete(l)
+    poolLines.clear()
+    poolLabels.clear()
+    if suShowPools
+        rightT = time + 15 * (time - time[1])
+        leftT  = time - 40 * (time - time[1])
+        for i = 0 to 17
+            lv = plLvl.get(i)
+            if not na(lv) and not plTaken.get(i) and plRank.get(i) <= 4
+                pc = plDir.get(i) == 1 ? suBearCol : suBullCol
+                poolLines.push(line.new(leftT, lv, rightT, lv, xloc = xloc.bar_time, color = color.new(pc, 40), style = line.style_dashed))
+                poolLabels.push(label.new(rightT, lv, plName.get(i), xloc = xloc.bar_time, style = label.style_label_left,
+                     color = color(na), textcolor = color.new(pc, 20), size = size.tiny))
+    if suShowBias
+        table.cell(biasTb, 0, 0, "Bias", text_color = chart.fg_color, text_size = size.small)
+        table.cell(biasTb, 1, 0, "D", text_color = chart.fg_color, text_size = size.small)
+        table.cell(biasTb, 2, 0, "4H", text_color = chart.fg_color, text_size = size.small)
+        table.cell(biasTb, 3, 0, "1H", text_color = chart.fg_color, text_size = size.small)
+        table.cell(biasTb, 0, 1, "", text_size = size.small)
+        table.cell(biasTb, 1, 1, arrow(biasD), text_color = bcol(biasD), text_size = size.small)
+        table.cell(biasTb, 2, 1, arrow(bias4h), text_color = bcol(bias4h), text_size = size.small)
+        table.cell(biasTb, 3, 1, arrow(bias1h), text_color = bcol(bias1h), text_size = size.small)
+
+alertcondition(suEvSetupL, "SETUP long (A/A+)", "A or A+ long setup: sweep + displacement CHoCH. Wait for the retrace into the FVG and the 1m confirmation")
+alertcondition(suEvSetupS, "SETUP short (A/A+)", "A or A+ short setup: sweep + displacement CHoCH. Wait for the retrace into the FVG and the 1m confirmation")
+alertcondition(suEvFillL,  "SETUP long entry (A/A+)", "1m confirmation inside the zone: long entry")
+alertcondition(suEvFillS,  "SETUP short entry (A/A+)", "1m confirmation inside the zone: short entry")
 
 // ═════════════════════════ COMBINED SETUP ═════════════════════════
 gX = "Combined setup"
