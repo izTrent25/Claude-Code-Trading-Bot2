@@ -3,7 +3,7 @@
 //   Part 1: FVG / iFVG rebuild           (pvnt_bot/FVG_iFVG_Indicator.pine), plus buy/sell volume bars per gap
 //   Part 2: Order blocks: the leg before the liquidity sweep, one per trend, strong displacement
 //   Part 3: Swing points and liquidity    (own build of the idea in "Swing Points and Liquidity" by Leviathan)
-//   Part 4: Market structure: BOS / CHoCH, strong/weak high and low, premium/discount, previous D/W/M levels
+//   Part 4: Market structure: BOS / CHoCH (the user's "BOS & CHoCH" code), strong/weak high and low, premium/discount, previous D/W/M levels
 //           (own build of the structure ideas in LuxAlgo "Smart Money Concepts")
 //   THE SETUP: steps 1 to 7 of the trading plan (sweep, CHoCH with displacement, zone, entry, stop, target)
 //   Part 5: (next indicator goes here)
@@ -721,41 +721,30 @@ alertcondition(evLiqHi, "Liquidity above taken", "Price traded through a swing-h
 alertcondition(evLiqLo, "Liquidity below taken", "Price traded through a swing-low liquidity level")
 
 // ═════════════════════════ PART 4: MARKET STRUCTURE ═════════════════════════
-// Own build of the structure ideas in LuxAlgo's "Smart Money Concepts" (their order blocks, equal highs/lows and
-// fair value gaps are left out: parts 1 to 3 already cover those).
-//   - Swings: a swing high is a high that no candle beats for `size` candles after it (a swing low, the mirror).
-//   - BOS (break of structure): a candle BODY closes beyond the most recent swing high (bullish) or swing low
-//     (bearish). Wicks never count. In an up-trend you watch the lows, in a down-trend the highs.
-//   - CHoCH (market structure shift): the first BOS against the trend RIGHT AFTER A LIQUIDITY SWEEP (a part 3
-//     liquidity level taken within the last few candles). A break against the trend without a sweep still turns
-//     the trend but is labelled BOS.
-//   - "Swing" structure uses big swings (50 candles), "internal" uses small ones (5 candles).
-//   - Strong/weak high and low: the extremes of the current swing range. In a down-trend the high is "strong"
-//     (it made the lows) and the low is "weak" (likely to break); the other way round in an up-trend.
-//   - Premium/discount: top 5% of that range is premium (sell area), bottom 5% discount (buy area), middle equilibrium.
-// Decided on closed candles only, so nothing repaints. Old breaks are deleted so the chart stays readable.
+// BOS / CHoCH: the user's "BOS & CHoCH" indicator code (25 Nov 2026), merged in.
+//   - Swings: a pivot high is a high with `bcLen` lower highs on each side (a pivot low, the mirror). It is only
+//     known `bcLen` candles later.
+//   - A candle CLOSES above the last swing high (bullish) or below the last swing low (bearish): a break.
+//     If the trend was the other way it is a CHoCH, otherwise a BOS. Each swing can be broken only once.
+//   - Every break is drawn: a line from the swing to the breaking candle with a small BOS / CHoCH label.
+// Also here (unchanged): strong/weak high and low and premium/discount from the big 50-candle swing range,
+// and previous day / week / month levels. Decided on closed candles, so nothing repaints.
 gM  = "Structure: BOS / CHoCH"
-msOnlyConf = input.bool(true, "Only show confirmed BOS / CHoCH", group = gM,
-     tooltip = "On: only breaks that come after a liquidity sweep or order block AND a pullback into a fair value gap or order block are drawn, and only the most recent few. Off: every break is drawn.")
-msSwingOn  = input.bool(true, "Swing structure (big turns)", group = gM)
-msSwingLen = input.int(50, "Swing size, candles", minval = 10, maxval = 200, group = gM)
-msIntOn    = input.bool(true, "Internal structure (small turns)", group = gM,
-     tooltip = "Small BOS/CHoCH (dashed) inside the big swings. These are the short-term breaks TJR trades.")
-msIntLen   = input.int(3, "Internal size, candles", minval = 2, maxval = 20, group = gM,
-     tooltip = "A small swing low needs this many higher lows after it (a high, lower highs). 3 catches the pullback lows you mark on 5m.")
-msKeep     = input.int(30, "Breaks kept on the chart (each kind)", minval = 1, maxval = 50, group = gM)
-msNeedSw   = input.bool(true, "CHoCH needs a liquidity sweep", group = gM,
-     tooltip = "On: a break against the trend is only called CHoCH if a liquidity level (part 3) was taken shortly before it. Off: every break against the trend is a CHoCH.")
-msSwWin    = input.int(20, "Sweep window, candles before the break", minval = 1, maxval = 200, group = gM)
-msPoints   = input.bool(false, "Swing labels (HH, HL, LH, LL)", group = gM)
-msBullCol  = input.color(#089981, "Bullish", group = gM)
-msBearCol  = input.color(#F23645, "Bearish", group = gM)
+bcShow     = input.bool(true, "Show BOS / CHoCH", group = gM)
+bcLen      = input.int(5, "Pivot length", minval = 1, group = gM)
+bcLabels   = input.bool(true, "Show labels", group = gM)
+msBullCol  = input.color(#089981, "Bullish colour", group = gM)
+msBearCol  = input.color(#f23645, "Bearish colour", group = gM)
+bcAlertBos   = input.bool(true, "Alert on BOS", group = gM)
+bcAlertChoch = input.bool(true, "Alert on CHoCH", group = gM)
+msSwingLen = input.int(50, "Range swing size, candles (strong/weak high and low)", minval = 10, maxval = 200, group = gM)
+msPoints   = input.bool(false, "Range swing labels (HH, HL, LH, LL)", group = gM)
 
 gMZ = "Structure: range and zones"
 msStrong   = input.bool(true, "Strong / weak high and low", group = gMZ)
 msZones    = input.bool(false, "Premium / discount zones", group = gMZ)
 msEqCol    = input.color(#878b94, "Equilibrium zone", group = gMZ)
-msCandles  = input.bool(false, "Colour candles by internal trend", group = gMZ)
+msCandles  = input.bool(false, "Colour candles by trend", group = gMZ)
 
 gML = "Structure: previous day / week / month high and low"
 lvlD   = input.bool(false, "Previous day", group = gML)
@@ -772,14 +761,12 @@ type MsPivot
 
 var MsPivot sHi = MsPivot.new(na, na, true, na, na)
 var MsPivot sLo = MsPivot.new(na, na, true, na, na)
-var MsPivot iHi = MsPivot.new(na, na, true, na, na)
-var MsPivot iLo = MsPivot.new(na, na, true, na, na)
-var int sTrend = 0      // swing trend: +1 up, -1 down
-var int iTrend = 0      // internal trend
-var sLines  = array.new<line>()
-var sLabels = array.new<label>()
-var iLines  = array.new<line>()
-var iLabels = array.new<label>()
+var MsPivot iHi = MsPivot.new(na, na, true, na, na)   // the BOS / CHoCH swing high
+var MsPivot iLo = MsPivot.new(na, na, true, na, na)   // the BOS / CHoCH swing low
+var int sTrend = 0      // trend of the big range swings (for strong/weak labels)
+var int iTrend = 0      // BOS / CHoCH trend: +1 bullish, -1 bearish, 0 start
+var bcLines  = array.new<line>()
+var bcLabelArr = array.new<label>()
 // range for strong/weak and zones
 var float rTop = na
 var int   rTopT = na
@@ -789,10 +776,10 @@ var int   rStartT = na
 var int   rStartIdx = na
 evSBos = 0
 evSChoch = 0
-evIBos = 0
-evIChoch = 0
+evIBos = 0      // +1 bullish BOS, -1 bearish BOS this candle
+evIChoch = 0    // +1 bullish CHoCH, -1 bearish CHoCH this candle
 
-// leg: 0 after a new swing high (price now falling), 1 after a new swing low
+// big range swings (only for strong/weak high and low and the zones; not drawn as breaks)
 msLeg(int size) =>
     var int lg = 0
     hh = ta.highest(size)
@@ -804,11 +791,8 @@ msLeg(int size) =>
     lg
 
 sLeg = msLeg(msSwingLen)
-iLeg = msLeg(msIntLen)
 sNewLow  = ta.change(sLeg) == 1
 sNewHigh = ta.change(sLeg) == -1
-iNewLow  = ta.change(iLeg) == 1
-iNewHigh = ta.change(iLeg) == -1
 
 setPivot(MsPivot p, float lvl, int size) =>
     p.last    := p.level
@@ -829,10 +813,14 @@ if sNewHigh
     if msPoints
         label.new(sHi.t, sHi.level, na(sHi.last) or sHi.level > sHi.last ? "HH" : "LH", xloc = xloc.bar_time,
              style = label.style_label_down, color = color(na), textcolor = msBearCol, size = size.tiny)
-if iNewLow
-    setPivot(iLo, low[msIntLen], msIntLen)
-if iNewHigh
-    setPivot(iHi, high[msIntLen], msIntLen)
+
+// BOS / CHoCH pivots (pivot high / low with bcLen candles on each side)
+bcPh = ta.pivothigh(high, bcLen, bcLen)
+bcPl = ta.pivotlow(low, bcLen, bcLen)
+if not na(bcPh)
+    setPivot(iHi, high[bcLen], bcLen)
+if not na(bcPl)
+    setPivot(iLo, low[bcLen], bcLen)
 
 // keep the range extremes up to date
 if na(rTop) or high > rTop
@@ -840,54 +828,50 @@ if na(rTop) or high > rTop
 if na(rBot) or low < rBot
     rBot := low, rBotT := time
 
-// was liquidity on this side taken shortly before now? dir +1: a low was swept (sets up a bullish CHoCH)
-sweptBefore(int dir) =>
-    idx = dir == 1 ? lastLowSweepIdx : lastHighSweepIdx
-    not msNeedSw or (not na(idx) and bar_index - idx <= msSwWin)
-
-drawBreak4(MsPivot p, string tag, color col, bool small, bool up, array<line> ls, array<label> lbs) =>
-    ls.push(line.new(p.t, p.level, time, p.level, xloc = xloc.bar_time, color = col,
-         style = small ? line.style_dashed : line.style_solid))
-    lbs.push(label.new(math.round((p.idx + bar_index) / 2), p.level, tag, color = color(na), textcolor = col,
-         style = up ? label.style_label_down : label.style_label_up, size = small ? size.tiny : size.small))
-    while ls.size() > msKeep
-        line.delete(ls.shift())
-        label.delete(lbs.shift())
+bcDraw(MsPivot p, color col, string txt, bool isBear) =>
+    if bcShow
+        bcLines.push(line.new(p.idx, p.level, bar_index, p.level, color = col, style = line.style_solid, width = 1))
+        if bcLabels
+            bcLabelArr.push(label.new(int(math.avg(p.idx, bar_index)), p.level, txt, color = color.new(color.white, 100),
+                 style = isBear ? label.style_label_up : label.style_label_down, textcolor = col, size = size.tiny))
+        while bcLines.size() > 150
+            line.delete(bcLines.shift())
+        while bcLabelArr.size() > 150
+            label.delete(bcLabelArr.shift())
 
 if barstate.isconfirmed
-    // internal first (small swings), skipping levels that are also the swing level
-    if not iHi.crossed and not na(iHi.level) and close > iHi.level and iHi.level != sHi.level
+    // bullish break: a close above the swing high
+    if not iHi.crossed and not na(iHi.level) and close > iHi.level
         iHi.crossed := true
-        tag = iTrend == -1 and sweptBefore(1) ? "CHoCH" : "BOS"
-        evIChoch := tag == "CHoCH" ? 1 : evIChoch
-        evIBos   := tag == "BOS" ? 1 : evIBos
+        isChoch = iTrend == -1
+        bcDraw(iHi, msBullCol, isChoch ? "CHoCH" : "BOS", false)
+        evIChoch := isChoch ? 1 : 0
+        evIBos   := isChoch ? 0 : 1
         iTrend := 1
-        if msIntOn and not msOnlyConf
-            drawBreak4(iHi, tag, msBullCol, true, true, iLines, iLabels)
-    if not iLo.crossed and not na(iLo.level) and close < iLo.level and iLo.level != sLo.level
+    // bearish break: a close below the swing low
+    if not iLo.crossed and not na(iLo.level) and close < iLo.level
         iLo.crossed := true
-        tag = iTrend == 1 and sweptBefore(-1) ? "CHoCH" : "BOS"
-        evIChoch := tag == "CHoCH" ? -1 : evIChoch
-        evIBos   := tag == "BOS" ? -1 : evIBos
+        isChoch = iTrend == 1
+        bcDraw(iLo, msBearCol, isChoch ? "CHoCH" : "BOS", true)
+        evIChoch := isChoch ? -1 : evIChoch
+        evIBos   := isChoch ? evIBos : -1
         iTrend := -1
-        if msIntOn and not msOnlyConf
-            drawBreak4(iLo, tag, msBearCol, true, false, iLines, iLabels)
+    // big range swings: trend only (for the strong / weak labels)
     if not sHi.crossed and not na(sHi.level) and close > sHi.level
         sHi.crossed := true
-        tag = sTrend == -1 and sweptBefore(1) ? "CHoCH" : "BOS"
-        evSChoch := tag == "CHoCH" ? 1 : evSChoch
-        evSBos   := tag == "BOS" ? 1 : evSBos
         sTrend := 1
-        if msSwingOn and not msOnlyConf
-            drawBreak4(sHi, tag, msBullCol, false, true, sLines, sLabels)
     if not sLo.crossed and not na(sLo.level) and close < sLo.level
         sLo.crossed := true
-        tag = sTrend == 1 and sweptBefore(-1) ? "CHoCH" : "BOS"
-        evSChoch := tag == "CHoCH" ? -1 : evSChoch
-        evSBos   := tag == "BOS" ? -1 : evSBos
         sTrend := -1
-        if msSwingOn and not msOnlyConf
-            drawBreak4(sLo, tag, msBearCol, false, false, sLines, sLabels)
+
+if bcAlertBos and evIBos == 1
+    alert("Bullish BOS on " + syminfo.ticker + " (" + timeframe.period + ") @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+if bcAlertBos and evIBos == -1
+    alert("Bearish BOS on " + syminfo.ticker + " (" + timeframe.period + ") @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+if bcAlertChoch and evIChoch == 1
+    alert("Bullish CHoCH on " + syminfo.ticker + " (" + timeframe.period + ") @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+if bcAlertChoch and evIChoch == -1
+    alert("Bearish CHoCH on " + syminfo.ticker + " (" + timeframe.period + ") @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar)
 
 // strong / weak high and low, premium / discount zones (drawn once, on the last bar)
 var line  swHiLn = na
@@ -947,14 +931,13 @@ if barstate.islast
     drawLvl(lvlW, "W", pwH, pwL, pwT, "W")
     drawLvl(lvlM, "M", pmH, pmL, pmT, "M")
 
-alertcondition(evSBos == 1,   "Swing bullish BOS",   "Bullish break of structure (swing)")
-alertcondition(evSBos == -1,  "Swing bearish BOS",   "Bearish break of structure (swing)")
-alertcondition(evSChoch == 1, "Swing bullish CHoCH", "Bullish change of character (swing)")
-alertcondition(evSChoch == -1,"Swing bearish CHoCH", "Bearish change of character (swing)")
-alertcondition(evIBos == 1,   "Internal bullish BOS",   "Bullish break of structure (internal)")
-alertcondition(evIBos == -1,  "Internal bearish BOS",   "Bearish break of structure (internal)")
-alertcondition(evIChoch == 1, "Internal bullish CHoCH", "Bullish change of character (internal)")
-alertcondition(evIChoch == -1,"Internal bearish CHoCH", "Bearish change of character (internal)")
+alertcondition(evIBos != 0, "BOS", "BOS detected on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(evIChoch != 0, "CHoCH", "CHoCH detected on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(evIBos != 0 or evIChoch != 0, "BOS or CHoCH", "Structure break detected on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(evIBos == 1, "Bullish BOS", "Bullish BOS on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(evIBos == -1, "Bearish BOS", "Bearish BOS on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(evIChoch == 1, "Bullish CHoCH", "Bullish CHoCH on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(evIChoch == -1, "Bearish CHoCH", "Bearish CHoCH on {{ticker}} ({{interval}}) @ {{close}}")
 
 // ═════════════════════════ CONFIRMED BOS (the trade trigger) ═════════════════════════
 // Only signals a BOS when the full sequence happened, in this order (bullish; bearish is the mirror):
