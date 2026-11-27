@@ -8,13 +8,9 @@
 //   THE SETUP: the TJR sequence, graded A+/A/B (bias, ranked sweep, displacement CHoCH, FVG zone, 1m trigger)
 //   Part 5: Sessions (the user's "TJR-Style Sessions" code): Asia, London, New York highs and lows
 //   Part 6: (next indicator goes here)
-// Setup signal (proposed, switchable):
-//   LONG  = trend is up (last shift bullish), a live bullish order block exists, and price comes back into a
-//           bullish FVG that overlaps that block. One signal per block. Stop idea: below the block.
-//   SHORT = mirror. Target: not decided yet.
-// It only draws and marks signals. It is an indicator for now so nothing can be backtested by accident.
+// It only draws. It is an indicator for now so nothing can be backtested by accident.
 indicator("Combined: FVG + OB + Liquidity + Structure", "Combined", overlay = true, max_boxes_count = 500, max_lines_count = 500,
-     max_labels_count = 500, max_bars_back = 1000, calc_bars_count = 5000)
+     max_labels_count = 500, max_bars_back = 1000, calc_bars_count = 3000)
 
 // ═════════════════════════ PART 1: FAIR VALUE GAPS ═════════════════════════
 // ───────────────────────── Inputs ─────────────────────────
@@ -184,8 +180,6 @@ atrC     = ta.atr(14)
 
 // Events for alerts, reset every bar.
 evEnter = false
-fvgRetBull = false   // a candle came back into a live bullish gap (without closing through it)
-fvgRetBear = false
 evCE    = false
 evInv   = false
 
@@ -209,11 +203,6 @@ if barstate.isconfirmed and array.size(zones) > 0
         touchedMid  = z.dir == 1 ? low <= mid   : high >= mid
         entered     = z.dir == 1 ? low <= near  : high >= near
         isFilled    = fillMode == "Wick" ? wickFar : bodyThrough
-        if entered and not bodyThrough
-            if z.dir == 1
-                fvgRetBull := true
-            else
-                fvgRetBear := true
         if bodyThrough and z.inverted
             kill(z)
             array.remove(zones, i)
@@ -506,8 +495,6 @@ drawBreak(int fromIdx, float level, bool isShift, int dir) =>
 evBullNew = false
 evBearNew = false
 evOBEnter   = false
-obRetBull   = false   // a candle came back into the live bullish order block
-obRetBear   = false
 evGone    = false
 
 // 1. Update existing blocks first (a block made on this bar is not tested against its own bar).
@@ -541,11 +528,6 @@ if barstate.isconfirmed and array.size(obs) > 0
             if not na(o.lb)
                 label.set_x(o.lb, bar_index + obExtend)
             inside = o.dir == 1 ? low <= o.top : high >= o.bot
-            if inside
-                if o.dir == 1
-                    obRetBull := true
-                else
-                    obRetBear := true
             if inside and not o.touched
                 o.touched := true
                 evOBEnter := true
@@ -618,22 +600,8 @@ type Liq
     int   dir      // +1 = swing high (buy stops above), -1 = swing low (sell stops below)
 
 var liqs = array.new<Liq>()
-var int lastHighSweepIdx = na   // last bar that took out a swing-high level
-var int lastLowSweepIdx  = na   // last bar that took out a swing-low level
 evLiqHi = false
 evLiqLo = false
-swpLoNow = false   // a swing-low level was swept: price ran through it and closed back above
-swpHiNow = false
-swpLoExt = low     // the sweep's extreme wick
-swpHiExt = high
-// a level taken with a close beyond it is still a sweep if price closes back inside within 3 candles (one 15m
-// candle on a 5m chart): these hold the pending one
-var float pendHiLvl = na
-var float pendHiExt = na
-var int   pendHiIdx = na
-var float pendLoLvl = na
-var float pendLoExt = na
-var int   pendLoIdx = na
 
 lPivHi = ta.pivothigh(high, liqLeft, liqRight)
 lPivLo = ta.pivotlow(low, liqLeft, liqRight)
@@ -660,22 +628,10 @@ if barstate.isconfirmed
         for i = array.size(liqs) - 1 to 0
             q = array.get(liqs, i)
             taken = q.dir == 1 ? high >= q.level : low <= q.level
-            if taken and q.dir == -1 and close > q.level
-                swpLoNow := true
-            if taken and q.dir == 1 and close < q.level
-                swpHiNow := true
-            if taken and q.dir == -1 and close <= q.level
-                pendLoLvl := na(pendLoLvl) ? q.level : math.max(pendLoLvl, q.level)
-                pendLoIdx := bar_index
-            if taken and q.dir == 1 and close >= q.level
-                pendHiLvl := na(pendHiLvl) ? q.level : math.min(pendHiLvl, q.level)
-                pendHiIdx := bar_index
             if taken
                 if q.dir == 1
-                    lastHighSweepIdx := bar_index
                     evLiqHi := true
                 else
-                    lastLowSweepIdx := bar_index
                     evLiqLo := true
                 line.set_x2(q.ln, bar_index)
                 box.set_right(q.bx, bar_index)
@@ -694,24 +650,6 @@ if barstate.isconfirmed
         q = array.shift(liqs)
         line.delete(q.ln)
         box.delete(q.bx)
-
-if barstate.isconfirmed
-    if not na(pendHiLvl)
-        pendHiExt := na(pendHiExt) ? high : math.max(pendHiExt, high)
-        if bar_index > pendHiIdx and close < pendHiLvl
-            swpHiNow := true
-            swpHiExt := pendHiExt
-            pendHiLvl := na, pendHiExt := na
-        else if bar_index - pendHiIdx >= 3
-            pendHiLvl := na, pendHiExt := na
-    if not na(pendLoLvl)
-        pendLoExt := na(pendLoExt) ? low : math.min(pendLoExt, low)
-        if bar_index > pendLoIdx and close > pendLoLvl
-            swpLoNow := true
-            swpLoExt := pendLoExt
-            pendLoLvl := na, pendLoExt := na
-        else if bar_index - pendLoIdx >= 3
-            pendLoLvl := na, pendLoExt := na
 
 plotshape(liqShow and liqDots and not na(lPivHi) and lVolOk ? lPivHi : na, "Swing high", shape.circle,
      location.absolute, liqHiCol, offset = -liqRight, size = size.tiny)
@@ -956,78 +894,6 @@ alertcondition(evIBos == 1, "Bullish BOS", "Bullish BOS on {{ticker}} ({{interva
 alertcondition(evIBos == -1, "Bearish BOS", "Bearish BOS on {{ticker}} ({{interval}}) @ {{close}}")
 alertcondition(evIChoch == 1, "Bullish CHoCH", "Bullish CHoCH on {{ticker}} ({{interval}}) @ {{close}}")
 alertcondition(evIChoch == -1, "Bearish CHoCH", "Bearish CHoCH on {{ticker}} ({{interval}}) @ {{close}}")
-
-// ═════════════════════════ CONFIRMED BOS (the trade trigger) ═════════════════════════
-// Only signals a BOS when the full sequence happened, in this order (bullish; bearish is the mirror):
-//   1. ANCHOR: liquidity below was swept (part 3 level taken) or a new bullish order block formed (part 2).
-//   2. RETRACE: after that, price came back into a live bullish fair value gap (part 1) and/or the bullish
-//      order block, without closing through it.
-//   3. BOS: then a candle body closes above the most recent small swing high (part 4 internal structure).
-// All three must happen within the window. After a signal the sequence resets.
-gB2 = "Confirmed BOS signal"
-cbShow   = input.bool(false, "Show confirmed BOS", group = gB2)
-cbRetrOn = input.string("FVG or order block", "Retrace must reach", options = ["FVG or order block", "FVG only", "Order block only", "FVG and order block"], group = gB2)
-cbWin    = input.int(40, "Window, candles from anchor to BOS", minval = 5, maxval = 300, group = gB2)
-cbCol    = input.color(#2962ff, "Colour", group = gB2)
-cbKeep   = input.int(4, "Confirmed breaks kept on the chart", minval = 1, maxval = 50, group = gB2)
-var cbLines  = array.new<line>()
-var cbLabels = array.new<label>()
-
-var int cbBullAnchor = na
-var int cbBearAnchor = na
-var int cbBullFvg = na
-var int cbBullOb  = na
-var int cbBearFvg = na
-var int cbBearOb  = na
-cbLong  = false
-cbShort = false
-
-retOk(int f, int o) =>
-    cbRetrOn == "FVG only" ? not na(f) : cbRetrOn == "Order block only" ? not na(o) : cbRetrOn == "FVG and order block" ? (not na(f) and not na(o)) : (not na(f) or not na(o))
-
-if barstate.isconfirmed
-    // 3. the BOS first (any internal break: BOS or CHoCH), after the retrace, inside the window.
-    //    Checked before new anchors, because the same breaking candle often also creates a new order block.
-    if (evIBos == 1 or evIChoch == 1) and not na(cbBullAnchor) and bar_index - cbBullAnchor <= cbWin and retOk(cbBullFvg, cbBullOb)
-        cbLong := true
-        cbBullAnchor := na, cbBullFvg := na, cbBullOb := na
-    if (evIBos == -1 or evIChoch == -1) and not na(cbBearAnchor) and bar_index - cbBearAnchor <= cbWin and retOk(cbBearFvg, cbBearOb)
-        cbShort := true
-        cbBearAnchor := na, cbBearFvg := na, cbBearOb := na
-    // expire stale sequences
-    if not na(cbBullAnchor) and bar_index - cbBullAnchor > cbWin
-        cbBullAnchor := na, cbBullFvg := na, cbBullOb := na
-    if not na(cbBearAnchor) and bar_index - cbBearAnchor > cbWin
-        cbBearAnchor := na, cbBearFvg := na, cbBearOb := na
-    // 1. anchors: a sweep (re)starts the sequence; a new order block starts one only if none is running
-    if evLiqLo or (evBullNew and na(cbBullAnchor))
-        cbBullAnchor := bar_index, cbBullFvg := na, cbBullOb := na
-    if evLiqHi or (evBearNew and na(cbBearAnchor))
-        cbBearAnchor := bar_index, cbBearFvg := na, cbBearOb := na
-    // 2. retraces after the anchor (not on the anchor candle itself)
-    if not na(cbBullAnchor) and bar_index > cbBullAnchor
-        if fvgRetBull
-            cbBullFvg := bar_index
-        if obRetBull
-            cbBullOb := bar_index
-    if not na(cbBearAnchor) and bar_index > cbBearAnchor
-        if fvgRetBear
-            cbBearFvg := bar_index
-        if obRetBear
-            cbBearOb := bar_index
-
-// draw a confirmed break: line from the broken swing to the breaking candle, labelled BOS or CHoCH
-if cbShow and (cbLong or cbShort)
-    p   = cbLong ? iHi : iLo
-    tag = (cbLong ? evIChoch == 1 : evIChoch == -1) ? "CHoCH" : "BOS"
-    cbLines.push(line.new(p.t, p.level, time, p.level, xloc = xloc.bar_time, color = cbCol, width = 2))
-    cbLabels.push(label.new(math.round((p.idx + bar_index) / 2), p.level, tag + " ✓", color = cbCol, textcolor = color.white,
-         style = cbLong ? label.style_label_down : label.style_label_up, size = size.small))
-    while cbLines.size() > cbKeep
-        line.delete(cbLines.shift())
-        label.delete(cbLabels.shift())
-alertcondition(cbLong,  "Confirmed bullish BOS", "Sweep or order block, retrace into FVG/OB, then bullish BOS")
-alertcondition(cbShort, "Confirmed bearish BOS", "Sweep or order block, retrace into FVG/OB, then bearish BOS")
 
 // ═════════════════════════ PART 5: SESSIONS ═════════════════════════
 // The user's "TJR-Style Sessions (Clean Lines + Following Labels)" code, merged in (26 Nov 2026).
@@ -1649,46 +1515,3 @@ alertcondition(suEvSetupS, "SETUP short (A/A+)", "A or A+ short setup: sweep + d
 alertcondition(suEvFillL,  "SETUP long entry (A/A+)", "1m confirmation inside the zone: long entry")
 alertcondition(suEvFillS,  "SETUP short entry (A/A+)", "1m confirmation inside the zone: short entry")
 
-// ═════════════════════════ COMBINED SETUP ═════════════════════════
-gX = "Combined setup"
-showSig = input.bool(false, "Show setup signals", group = gX)
-needLiq  = input.bool(false, "Require a liquidity sweep before the shift", group = gX,
-     tooltip = "TJR's full setup. Long: a swing-low liquidity level was taken within the window before the bullish order block formed. Short: a swing-high level.")
-liqWin   = input.int(30, "Sweep window, candles before the shift", minval = 1, maxval = 500, group = gX)
-minShare = input.float(0, "Gap volume must agree, min %", minval = 0, maxval = 100, step = 5, group = gX,
-     tooltip = "0 = off. Example 60: a bullish gap only counts if at least 60% of its middle candle's volume was buying (bearish: selling).")
-
-hitFvg(int dir, float obTop, float obBot) =>
-    hit = false
-    for z in zones
-        fresh = box.get_left(z.bx) < time[2]   // not a gap made by this very candle
-        overlap = z.bot <= obTop and z.top >= obBot
-        volOk = minShare == 0 or na(z.buyPct) or (dir == 1 ? z.buyPct >= minShare : 100 - z.buyPct >= minShare)
-        if fresh and overlap and volOk and z.dir == dir and not z.inverted and z.state != "FILLED"
-            entered = dir == 1 ? (low <= z.top and close > z.bot) : (high >= z.bot and close < z.top)
-            if entered
-                hit := true
-    hit
-
-longSig  = false
-shortSig = false
-float sigStop = na
-if barstate.isconfirmed
-    for o in obs
-        sweepIdx = o.dir == 1 ? lastLowSweepIdx : lastHighSweepIdx
-        liqOk = not needLiq or (not na(sweepIdx) and sweepIdx <= o.madeIdx and o.madeIdx - sweepIdx <= liqWin)
-        if liqOk and not o.fired and ((o.dir == 1 and trend == 1) or (o.dir == -1 and trend == -1))
-            if hitFvg(o.dir, o.top, o.bot)
-                o.fired := true
-                if o.dir == 1
-                    longSig := true
-                    sigStop := o.bot
-                else
-                    shortSig := true
-                    sigStop := o.top
-
-plotshape(showSig and longSig,  "Long setup",  shape.triangleup,   location.belowbar, color.new(#00e676, 0), size = size.small, text = "L")
-plotshape(showSig and shortSig, "Short setup", shape.triangledown, location.abovebar, color.new(#ff1744, 0), size = size.small, text = "S")
-plot(showSig ? sigStop : na, "Setup stop", color.new(color.gray, 0), style = plot.style_circles, linewidth = 2)
-alertcondition(longSig,  "Long setup",  "Combined: price returned to a bullish FVG inside a bullish order block")
-alertcondition(shortSig, "Short setup", "Combined: price returned to a bearish FVG inside a bearish order block")
