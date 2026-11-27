@@ -20,7 +20,7 @@
 | # | Mandatory for A | Rule in the code |
 |---|---|---|
 | M1 | Bias | last BOS/CHoCH (pivot 5, close beyond) on 4H and 1H both agree; both against = no setup; one = B |
-| M2 | Meaningful liquidity | ranked untouched pools: 1 PDH/PDL, 2 PWH/PWL, 3 Asia (18:00-00:00), London (02:00-05:00), NY premarket (05:00-09:30) high/low, 4 EQH/EQL (two pivots within 0.1 ATR), 5 4H/1H swing, 6 clean 15m swing. Wick through, close back inside within one 15-minute period |
+| M2 | Meaningful liquidity | ranked untouched pools: 1 PDH/PDL, 2 PWH/PWL, 3 Asia (18:00-02:00), London (02:00-09:30, includes premarket), New York (09:30-16:00) high/low from part 5 sessions, 4 EQH/EQL (two pivots within 0.1 ATR), 5 4H/1H swing, 6 clean 15m swing. Wick through, close back inside within one 15-minute period |
 | M3 | Displacement | breaking candle body >= 1 x ATR or move from sweep >= 2 x ATR, AND a fair value gap in the move (middle candle at or after the sweep). No gap = NO TRADE |
 | M4 | CHoCH | body close through the 3-candle swing that started the leg into the sweep, within 12 candles |
 | M5 | Zone | the displacement gap |
