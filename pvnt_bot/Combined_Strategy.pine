@@ -14,7 +14,7 @@
 //   SHORT = mirror. Target: not decided yet.
 // It only draws and marks signals. It is an indicator for now so nothing can be backtested by accident.
 indicator("Combined: FVG + OB + Liquidity + Structure", "Combined", overlay = true, max_boxes_count = 500, max_lines_count = 500,
-     max_labels_count = 500, max_bars_back = 1000)
+     max_labels_count = 500, max_bars_back = 1000, calc_bars_count = 5000)
 
 // ═════════════════════════ PART 1: FAIR VALUE GAPS ═════════════════════════
 // ───────────────────────── Inputs ─────────────────────────
@@ -241,8 +241,7 @@ range2  = high[1] - low[1]
 
 // Buy/sell volume of each candle, from a lower timeframe about 10x faster than the chart (1 minute at least).
 lowerTf  = str.tostring(math.max(1, math.ceil(timeframe.in_seconds(timeframe.period) / 60 / 10)))
-buyArr   = request.security_lower_tf(syminfo.tickerid, lowerTf, close > open ? volume : 0.0)
-sellArr  = request.security_lower_tf(syminfo.tickerid, lowerTf, close < open ? volume : 0.0)
+[buyArr, sellArr] = request.security_lower_tf(syminfo.tickerid, lowerTf, [close > open ? volume : 0.0, close < open ? volume : 0.0])
 buyVol   = array.sum(buyArr)
 sellVol  = array.sum(sellArr)
 bsTotal  = buyVol + sellVol
@@ -904,10 +903,28 @@ if barstate.islast and not na(rTop) and not na(rBot)
 plotcandle(msCandles ? open : na, high, low, close, "Trend candles", color = iTrend == 1 ? msBullCol : msBearCol,
      wickcolor = iTrend == 1 ? msBullCol : msBearCol, bordercolor = iTrend == 1 ? msBullCol : msBearCol, display = display.pane)
 
+// ── M1: higher-timeframe bias = direction of the last BOS/CHoCH (pivot 5, close beyond) on that timeframe ──
+htfTrend(int len) =>
+    var float sh = na
+    var float sl = na
+    var int tr = 0
+    xph = ta.pivothigh(high, len, len)
+    xpl = ta.pivotlow(low, len, len)
+    if not na(xph)
+        sh := xph
+    if not na(xpl)
+        sl := xpl
+    if not na(sh) and close > sh
+        tr := 1
+        sh := na
+    if not na(sl) and close < sl
+        tr := -1
+        sl := na
+    tr
 // previous day / week / month high and low
 prevLevels(string tf) =>
     request.security(syminfo.tickerid, tf, [high[1], low[1], time[1]], lookahead = barmerge.lookahead_on)
-[pdH, pdL, pdT] = prevLevels("D")
+[pdH, pdL, pdT, biasD] = request.security(syminfo.tickerid, "D", [high[1], low[1], time[1], htfTrend(5)[1]], lookahead = barmerge.lookahead_on)
 [pwH, pwL, pwT] = prevLevels("W")
 [pmH, pmL, pmT] = prevLevels("M")
 var lvlLines  = array.new<line>()
@@ -1152,27 +1169,6 @@ suShowBias  = input.bool(true, "Show bias table", group = gSU)
 suBullCol  = input.color(#00897b, "Long setup", group = gSU)
 suBearCol  = input.color(#d32f2f, "Short setup", group = gSU)
 
-// ── M1: higher-timeframe bias = direction of the last BOS/CHoCH (pivot 5, close beyond) on that timeframe ──
-htfTrend(int len) =>
-    var float sh = na
-    var float sl = na
-    var int tr = 0
-    xph = ta.pivothigh(high, len, len)
-    xpl = ta.pivotlow(low, len, len)
-    if not na(xph)
-        sh := xph
-    if not na(xpl)
-        sl := xpl
-    if not na(sh) and close > sh
-        tr := 1
-        sh := na
-    if not na(sl) and close < sl
-        tr := -1
-        sl := na
-    tr
-bias4h = request.security(syminfo.tickerid, "240", htfTrend(5)[1], lookahead = barmerge.lookahead_on)
-bias1h = request.security(syminfo.tickerid, "60", htfTrend(5)[1], lookahead = barmerge.lookahead_on)
-biasD  = request.security(syminfo.tickerid, "D", htfTrend(5)[1], lookahead = barmerge.lookahead_on)
 
 // ── M2: ranked liquidity pools ──
 // session highs/lows come from part 5 (asiaH/L, lonH/L, nyH/L)
@@ -1183,8 +1179,13 @@ htfSwing(int len) =>
     vh = ta.valuewhen(not na(xph), xph, 0)
     vl = ta.valuewhen(not na(xpl), xpl, 0)
     [vh[1], vl[1]]
-[h1H, h1L]   = request.security(syminfo.tickerid, "60", htfSwing(3), lookahead = barmerge.lookahead_on)
-[h4H, h4L]   = request.security(syminfo.tickerid, "240", htfSwing(3), lookahead = barmerge.lookahead_on)
+// bias (M1) and swing points from one request per timeframe
+htfBoth() =>
+    t = htfTrend(5)
+    [sh, sl] = htfSwing(3)
+    [t[1], sh, sl]
+[bias1h, h1H, h1L] = request.security(syminfo.tickerid, "60", htfBoth(), lookahead = barmerge.lookahead_on)
+[bias4h, h4H, h4L] = request.security(syminfo.tickerid, "240", htfBoth(), lookahead = barmerge.lookahead_on)
 [m15H, m15L] = request.security(syminfo.tickerid, "15", htfSwing(5), lookahead = barmerge.lookahead_on)
 // equal highs / lows from the part 4 pivots: two pivots within 0.1 x ATR
 var float eqH = na
@@ -1499,7 +1500,7 @@ trigPx = 0.0
 trigTxt = ""
 trigHit = false
 dead1m = false
-if barstate.isconfirmed and m1c.size() > 0
+if barstate.isconfirmed and m1c.size() > 0 and tr.stage >= 2 and tr.stage <= 3
     for j = 0 to m1c.size() - 1
         hj = m1h.get(j)
         lj = m1l.get(j)
