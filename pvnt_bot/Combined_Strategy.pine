@@ -1218,7 +1218,7 @@ if barstate.isconfirmed
         v = srcVals.get(i)
         d = plDir.get(i)
         // a new level from its source: untouched unless price is already beyond it
-        if not na(v) and v != plLvl.get(i)
+        if not na(v) and (na(plLvl.get(i)) or v != plLvl.get(i))
             plLvl.set(i, v)
             plTaken.set(i, d == 1 ? high > v : low < v)
             plPend.set(i, na)
@@ -1303,11 +1303,11 @@ suEvFillL  = false
 suEvFillS  = false
 
 suTrim() =>
-    while suLines.size() > suKeep * 7
+    while suLines.size() > suKeep * 11
         line.delete(suLines.shift())
-    while suLabels.size() > suKeep * 6
+    while suLabels.size() > suKeep * 10
         label.delete(suLabels.shift())
-    while suBoxes.size() > suKeep * 2
+    while suBoxes.size() > suKeep * 4
         box.delete(suBoxes.shift())
 
 suNote(int x, float y, string txt, color col, bool below) =>
@@ -1468,11 +1468,14 @@ suCandStep(SuCand c) =>
                                     suBoxes.push(box.new(c.obT, c.obTop, rightT, c.obBot, xloc = xloc.bar_time, border_color = color.new(col, 75),
                                          bgcolor = color.new(col, 94), text = "OB", text_size = size.tiny, text_color = fc, text_halign = text.align_left))
                                     suLines.push(line.new(c.sweepT, eq, rightT, eq, xloc = xloc.bar_time, color = color.new(col, 50), style = line.style_dotted))
+                                    suLines.push(line.new(time, ce, rightT, ce, xloc = xloc.bar_time, color = fc, width = 2))
+                                    suLabels.push(label.new(rightT, ce, "Entry area (FVG 50%), after 1m confirm", xloc = xloc.bar_time,
+                                         style = label.style_label_left, color = color(na), textcolor = fc, size = size.small))
                                     suLines.push(line.new(time, stop, rightT, stop, xloc = xloc.bar_time, color = color.gray, width = 2))
-                                    suLabels.push(label.new(rightT, stop, "Stop", xloc = xloc.bar_time, style = label.style_label_left,
+                                    suLabels.push(label.new(rightT, stop, "Stop loss", xloc = xloc.bar_time, style = label.style_label_left,
                                          color = color(na), textcolor = color.gray, size = size.small))
                                     suLines.push(line.new(time, x1, rightT, x1, xloc = xloc.bar_time, color = fc, style = line.style_dashed))
-                                    suLabels.push(label.new(rightT, x1, "Target ~" + rTxt(x1, ce, stop), xloc = xloc.bar_time,
+                                    suLabels.push(label.new(rightT, x1, "Take profit ~" + rTxt(x1, ce, stop), xloc = xloc.bar_time,
                                          style = label.style_label_left, color = color(na), textcolor = fc, size = size.small))
                                     if not na(x2)
                                         suLines.push(line.new(time, x2, rightT, x2, xloc = xloc.bar_time, color = fc, style = line.style_dotted))
@@ -1575,6 +1578,16 @@ if barstate.isconfirmed and tr.stage > 0
             else
                 tr.entry := trigPx
                 tr.stage := 4
+                if suShow
+                    rT = time + 20 * (time - time[1])
+                    suLines.push(line.new(time, trigPx, rT, trigPx, xloc = xloc.bar_time, color = fc, width = 3))
+                    suLines.push(line.new(time, tr.stop, rT, tr.stop, xloc = xloc.bar_time, color = color.new(color.red, 0), width = 2))
+                    suLines.push(line.new(time, tr.t1, rT, tr.t1, xloc = xloc.bar_time, color = color.new(color.green, 0), width = 2))
+                    suBoxes.push(box.new(time, isL ? tr.t1 : trigPx, rT, isL ? trigPx : tr.t1, xloc = xloc.bar_time, border_color = na, bgcolor = color.new(color.green, 88)))
+                    suBoxes.push(box.new(time, isL ? trigPx : tr.stop, rT, isL ? tr.stop : trigPx, xloc = xloc.bar_time, border_color = na, bgcolor = color.new(color.red, 88)))
+                    suLabels.push(label.new(rT, tr.stop, "SL " + str.tostring(tr.stop, format.mintick), xloc = xloc.bar_time, style = label.style_label_left, color = color(na), textcolor = color.red, size = size.small))
+                    suLabels.push(label.new(rT, tr.t1, "TP " + str.tostring(tr.t1, format.mintick) + "  (" + str.tostring(rr, "#.0") + "R)", xloc = xloc.bar_time, style = label.style_label_left, color = color(na), textcolor = color.green, size = size.small))
+                    suTrim()
                 suNote(bar_index, trigPx, (isL ? "ENTRY ▲ " : "ENTRY ▼ ") + trigTxt + "  " + str.tostring(rr, "#.0") + "R", fc, isL)
                 if tr.grade != "B"
                     if isL
